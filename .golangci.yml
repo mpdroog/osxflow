@@ -1,0 +1,70 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck        # unchecked errors
+    - staticcheck     # comprehensive static analysis
+    - unused          # unused code
+    - govet           # suspicious constructs
+    - ineffassign     # assignments never used
+    - errorlint       # error wrapping issues
+    - gocritic        # opinionated style checks
+    - misspell        # common spelling mistakes
+    - unconvert       # unnecessary type conversions
+    - unparam         # unused function parameters
+    - nakedret        # naked returns
+    - reassign        # reassignment of top-level variables
+    - asasalint       # []any passed as any in variadic params
+    - bidichk         # dangerous unicode bidi characters
+    - durationcheck   # incorrect duration multiplication
+    - copyloopvar     # loop variable capture
+    - makezero        # slice zero-length init with append
+    - nilerr          # returning nil with a non-nil error
+    - predeclared     # shadowing predeclared identifiers
+    - wastedassign    # wasted assignments
+    - gosec           # security issues
+    - forcetypeassert # unchecked type assertions
+    - usetesting      # use of testing helpers
+    - prealloc        # slice pre-allocation opportunities
+    - gocheckcompilerdirectives
+    - dupword         # duplicate words in source
+    - recvcheck       # receiver type consistency
+    - bodyclose       # unclosed HTTP response bodies
+    - noctx           # HTTP requests without context
+    - nosprintfhostport
+
+  settings:
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    govet:
+      enable-all: true
+      disable:
+        # Ordering struct fields by size makes the types harder to read
+        # for a saving that does not matter at this scale: the largest
+        # collection here is a few hundred App values.
+        - fieldalignment
+    nakedret:
+      max-func-lines: 0
+    staticcheck:
+      checks:
+        - all
+
+  exclusions:
+    rules:
+      # Tests construct deliberately odd inputs and check them directly;
+      # the security and duplication linters have nothing useful to say
+      # about that.
+      - path: _test\.go
+        linters:
+          - gosec
+          - dupword
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
