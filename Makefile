@@ -13,7 +13,7 @@ PREFIX  ?= $(HOME)/.local
 # what makes every binary a single file with no distro dependencies.
 export CGO_ENABLED = 0
 
-.PHONY: all $(TOOLS) test lint fuzz icons install clean
+.PHONY: all $(TOOLS) test lint errguard fuzz icons install clean
 
 all: $(TOOLS)
 
@@ -29,6 +29,7 @@ test:
 # testdata/fuzz keeps whatever earlier runs found.
 fuzz:
 	go test ./internal/calc   -run=XXX -fuzz=FuzzEval             -fuzztime=20s
+	go test ./internal/calc   -run=XXX -fuzz=FuzzRoundSignificant -fuzztime=20s
 	go test ./internal/search -run=XXX -fuzz=FuzzFilter           -fuzztime=20s
 	go test ./internal/ui     -run=XXX -fuzz=FuzzModelTyping      -fuzztime=20s
 	go test ./internal/dock   -run=XXX -fuzz=FuzzLayout           -fuzztime=20s
@@ -41,11 +42,30 @@ fuzz:
 	go test ./internal/geom   -run=XXX -fuzz=FuzzU16              -fuzztime=10s
 	go test ./internal/stack  -run=XXX -fuzz=FuzzParseTrashInfo   -fuzztime=20s
 	go test ./internal/stack  -run=XXX -fuzz=FuzzParseUserDirs    -fuzztime=20s
+	go test ./internal/notify -run=XXX -fuzz=FuzzParse            -fuzztime=20s
+	go test ./internal/xfconf -run=XXX -fuzz=FuzzParseSignal      -fuzztime=20s
+	go test ./internal/xwin   -run=XXX -fuzz=FuzzDecodeProperty   -fuzztime=20s
+	go test ./internal/scale  -run=XXX -fuzz=FuzzParseXfconf      -fuzztime=20s
+	go test ./internal/scale  -run=XXX -fuzz=FuzzFromResourceString -fuzztime=20s
 
-lint:
+lint: errguard
 	gofmt -l .
 	go vet ./...
 	golangci-lint run ./...
+
+# Every error is checked and then returned or logged -- never dropped.
+# errcheck catches a call whose error is ignored; this catches the ways of
+# checking an error only to throw it away, which no linter here looks at:
+# discarding it into _, folding it into a condition, or opting out of
+# errcheck altogether. Tests are exempt because there `err != nil || ...`
+# is how a failure reaches t.Errorf, error included.
+ERRDROP := //nolint:[a-z,]*errcheck|_ = err$$|\berr == nil &&|\berr != nil [|][|]
+
+errguard:
+	@if grep -rnE --include='*.go' --exclude='*_test.go' '$(ERRDROP)' cmd internal tools; then \
+		echo "errguard: errors above are checked and then dropped; return or log them"; \
+		exit 1; \
+	fi
 
 # Rasterise the desktop's icon theme into the PNGs cmd/dock embeds.
 #

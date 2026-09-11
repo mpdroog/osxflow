@@ -32,10 +32,6 @@ const (
 // list at the same size.
 const visibleRows = 7
 
-// fontDPI is fixed at the X11 default. Display scaling is applied to the
-// point sizes instead, so that one number controls everything.
-const fontDPI = 96
-
 // metrics is the layout at a particular display scale.
 type metrics struct {
 	scale float64
@@ -157,6 +153,11 @@ var (
 	// The calculator result is the one thing that is not an app, and is
 	// coloured to say so.
 	colCalc = color.RGBA{R: 0x8d, G: 0xd6, B: 0xa0, A: 0xff}
+
+	// A sum that cannot be worked out says why in the calculator's row,
+	// in the dim grey of a detail line: it is information, not an alarm,
+	// and the user may well be typing something else entirely.
+	colCalcError = colDetail
 )
 
 // placeholder is shown before anything is typed.

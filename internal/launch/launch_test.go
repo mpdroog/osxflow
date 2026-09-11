@@ -1,28 +1,126 @@
 package launch
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/mpdroog/osxflow/internal/desktop"
+	"github.com/mpdroog/osxflow/internal/errlog"
 	"github.com/mpdroog/osxflow/internal/xwin"
 )
 
 // exeMap builds an ExeFunc from pid -> path, and reports a missing pid the
-// way /proc does: as an error, not an empty string.
+// way /proc does: as fs.ErrNotExist, not an empty string.
 func exeMap(m map[uint32]string) ExeFunc {
 	return func(pid uint32) (string, error) {
 		if p, ok := m[pid]; ok {
 			return p, nil
 		}
-		return "", fmt.Errorf("no such process %d", pid)
+		return "", fmt.Errorf("no such process %d: %w", pid, fs.ErrNotExist)
+	}
+}
+
+// syncBuffer is a log destination that tolerates the reaper goroutine
+// SpawnDetached leaves behind writing to it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureLog sends the standard logger to a buffer for the test.
+func captureLog(t *testing.T) *syncBuffer {
+	t.Helper()
+	b := &syncBuffer{}
+	out, flags := log.Writer(), log.Flags()
+	log.SetOutput(b)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(out)
+		log.SetFlags(flags)
+	})
+	return b
+}
+
+// captureExeLog gives the test a fresh exeLog whose output goes to a slice.
+//
+// Fresh, not merely redirected: the limiter remembers which pids it has
+// already reported, so a second run of the same test (-count=2) would find
+// every key spent and see nothing logged.
+func captureExeLog(t *testing.T) *[]string {
+	t.Helper()
+	var got []string
+	prev := exeLog
+	exeLog = &errlog.Limiter{Burst: prev.Burst, Per: prev.Per,
+		Output: func(s string) { got = append(got, s) }}
+	t.Cleanup(func() { exeLog = prev })
+	return &got
+}
+
+// The three expected failures -- no pid, an exited process, someone
+// else's process -- are the matcher's normal diet and must stay quiet.
+// Anything else is logged, once per pid however often it recurs.
+func TestExePathReportsOnlyTheUnexpected(t *testing.T) {
+	got := captureExeLog(t)
+	failing := map[uint32]error{
+		900001: ErrNoPID,
+		900002: fmt.Errorf("reading /proc/900002/exe: %w", fs.ErrNotExist),
+		900003: fmt.Errorf("reading /proc/900003/exe: %w", fs.ErrPermission),
+		900004: errors.New("reading /proc/900004/exe: input/output error"),
+	}
+	exe := func(pid uint32) (string, error) { return "", failing[pid] }
+
+	for pid := range failing {
+		for range 3 {
+			if path, ok := exePath(exe, pid); ok || path != "" {
+				t.Errorf("exePath(%d) = %q, %v; want nothing", pid, path, ok)
+			}
+		}
+	}
+	if len(*got) != 1 || !strings.Contains((*got)[0], "input/output error") {
+		t.Errorf("logged %q, want the one I/O error, once", *got)
+	}
+}
+
+// A failing /proc read must not cost the match: the window still falls
+// back to class, in both directions of the lookup.
+func TestUnexpectedExeFailureFallsBackToClass(t *testing.T) {
+	got := captureExeLog(t)
+	exe := func(uint32) (string, error) { return "", errors.New("input/output error") }
+	app := desktop.App{Name: "Thing", Binary: "/usr/bin/thing", Argv: []string{"thing"}}
+	w := xwin.Window{ID: 1, PID: 900010, Instance: "thing", Class: "Thing"}
+
+	if _, conf := Match(&app, []xwin.Window{w}, exe); conf != ByBinaryName {
+		t.Errorf("Match confidence = %v, want ByBinaryName", conf)
+	}
+	w.PID = 900011
+	if owner, conf := NewIndex([]desktop.App{app}).Owner(&w, exe); owner == nil || conf != ByBinaryName {
+		t.Errorf("Owner = %v, %v; want Thing by binary name", owner, conf)
+	}
+	if len(*got) != 2 {
+		t.Errorf("logged %q, want one line per pid", *got)
 	}
 }
 
@@ -258,7 +356,12 @@ func TestOpenSpawnsWhenNotRunning(t *testing.T) {
 // If X cannot be read we cannot know whether the app is running. Starting
 // a second copy is a much better failure than silently doing nothing, so
 // Open must spawn and still report the problem.
+//
+// The start worked, so Open succeeds and the problem is logged. Returning
+// it made callers treat the launch as failed and keep the launcher open,
+// where a second Enter started a second copy.
 func TestOpenSpawnsWhenWindowListFails(t *testing.T) {
+	logged := captureLog(t)
 	app := desktop.App{Name: "Thing", Argv: []string{"thing"}}
 	server := &xwin.Fake{Err: errors.New("display gone")}
 	spawned := 0
@@ -268,15 +371,31 @@ func TestOpenSpawnsWhenWindowListFails(t *testing.T) {
 		Spawn:  func(*desktop.App) error { spawned++; return nil },
 	}
 
-	_, err := l.Open(&app)
-	if err == nil {
-		t.Fatal("Open returned no error, want the display failure reported")
+	res, err := l.Open(&app)
+	if err != nil {
+		t.Fatalf("Open: %v; want success, since the app was started", err)
 	}
-	if !strings.Contains(err.Error(), "display gone") {
-		t.Errorf("error = %v, want it to mention the display failure", err)
+	if res.Focused {
+		t.Error("Focused = true, want false")
 	}
 	if spawned != 1 {
 		t.Errorf("spawned %d, want 1", spawned)
+	}
+	if msg := logged.String(); !strings.Contains(msg, "display gone") || !strings.Contains(msg, "Thing") {
+		t.Errorf("logged %q, want the display failure and the app's name", msg)
+	}
+}
+
+// When the window list and the start both fail, both are the error.
+func TestOpenReportsBothFailures(t *testing.T) {
+	l := &Launcher{
+		Server: &xwin.Fake{Err: errors.New("display gone")},
+		Exe:    exeMap(nil),
+		Spawn:  func(*desktop.App) error { return errors.New("exec format error") },
+	}
+	_, err := l.Open(&desktop.App{Name: "Thing", Argv: []string{"thing"}})
+	if err == nil || !strings.Contains(err.Error(), "display gone") || !strings.Contains(err.Error(), "exec format error") {
+		t.Errorf("error = %v, want both failures", err)
 	}
 }
 
@@ -322,7 +441,7 @@ func TestOpenReportsSpawnFailure(t *testing.T) {
 func TestProcExeFindsOurOwnProcess(t *testing.T) {
 	// The one case where the real /proc lookup can be tested hermetically:
 	// this test binary is a process whose executable we can verify.
-	self := uint32(os.Getpid()) //nolint:gosec // pids fit
+	self := uint32(os.Getpid())
 	path, err := ProcExe(self)
 	if err != nil {
 		t.Fatalf("ProcExe(self): %v", err)
@@ -333,8 +452,17 @@ func TestProcExeFindsOurOwnProcess(t *testing.T) {
 }
 
 func TestProcExeRejectsZero(t *testing.T) {
-	if _, err := ProcExe(0); err == nil {
-		t.Error("ProcExe(0) succeeded, want an error")
+	if _, err := ProcExe(0); !errors.Is(err, ErrNoPID) {
+		t.Errorf("ProcExe(0) error = %v, want ErrNoPID", err)
+	}
+}
+
+// A process that is gone must be recognisable as gone, since that is the
+// failure the matcher treats as normal.
+func TestProcExeReportsAnExitedProcessAsNotExist(t *testing.T) {
+	// Far above any pid_max Linux allows (2^22).
+	if _, err := ProcExe(1 << 30); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("ProcExe(no such process) error = %v, want fs.ErrNotExist", err)
 	}
 }
 
@@ -469,7 +597,7 @@ func TestSpawnDetachedRunsTheCommand(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		data, err := os.ReadFile(marker) //nolint:gosec // a path this test just made
+		data, err := os.ReadFile(marker)
 		if err == nil && string(data) == "ok" {
 			return
 		}
@@ -500,7 +628,7 @@ func TestSpawnDetachedPutsChildInItsOwnSession(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var got string
 	for {
-		data, err := os.ReadFile(out) //nolint:gosec // a path this test just made
+		data, err := os.ReadFile(out)
 		if err == nil && strings.TrimSpace(string(data)) != "" {
 			got = strings.TrimSpace(string(data))
 			break
@@ -557,6 +685,54 @@ func TestSpawnDetachedReportsAMissingBinary(t *testing.T) {
 	app := desktop.App{Name: "Absent", Argv: []string{"/nonexistent/definitely-not-here"}}
 	if err := SpawnDetached(&app); err == nil {
 		t.Error("SpawnDetached succeeded for a binary that does not exist")
+	}
+}
+
+// The exit of a started app is logged with its name: in the dock that is
+// the only trace of an app that died on startup. A missing home directory
+// does not stop the start, and is logged too.
+func TestSpawnDetachedLogsTheExitAndAMissingHome(t *testing.T) {
+	logged := captureLog(t)
+	t.Setenv("HOME", "")
+	app := desktop.App{Name: "Failing", Argv: []string{"/bin/sh", "-c", "exit 3"}}
+	if err := SpawnDetached(&app); err != nil {
+		t.Fatalf("SpawnDetached: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(logged.String(), "Failing exited: exit status 3") {
+		if time.Now().After(deadline) {
+			t.Fatalf("logged %q, want the exit status", logged.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(logged.String(), "no home directory, starting Failing") {
+		t.Errorf("logged %q, want the missing home directory", logged.String())
+	}
+}
+
+// Candidates that are not installed are expected; one that is there but
+// cannot be run is a fault, and is in the error.
+func TestWrapInTerminalReportsWhatWasNotMissing(t *testing.T) {
+	broken := filepath.Join(t.TempDir(), "brokenterm")
+	if err := os.WriteFile(broken, []byte("#!/bin/sh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := terminalCandidates
+	terminalCandidates = []string{"definitely-not-a-terminal", broken}
+	t.Cleanup(func() { terminalCandidates = prev })
+
+	_, err := wrapInTerminal([]string{"htop"})
+	if err == nil {
+		t.Fatal("wrapInTerminal succeeded with no usable terminal")
+	}
+	if !strings.Contains(err.Error(), "no terminal emulator found") {
+		t.Errorf("error = %v, want it to say no terminal was found", err)
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("error = %v, want the non-executable candidate's permission error in it", err)
+	}
+	if errors.Is(err, exec.ErrNotFound) {
+		t.Errorf("error = %v, want the uninstalled candidate left out", err)
 	}
 }
 

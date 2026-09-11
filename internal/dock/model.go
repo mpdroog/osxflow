@@ -3,6 +3,8 @@ package dock
 // Turning the state of the desktop into a row of items.
 
 import (
+	"fmt"
+	"log"
 	"strings"
 
 	"github.com/mpdroog/osxflow/internal/icons"
@@ -51,6 +53,13 @@ type Builder struct {
 	// DownloadsDir is what the Downloads stack lists.
 	DownloadsDir string
 
+	// Warn receives what Build could not find out -- today, whether the
+	// trash is empty. Build still returns a row, so these are not errors
+	// it can return; and it runs on every window-list change, so the
+	// caller is the one placed to say each problem once rather than on
+	// every call. Nil logs every one.
+	Warn func(error)
+
 	// transient is the remembered order of unpinned running apps.
 	transient []string
 }
@@ -67,8 +76,9 @@ func (b *Builder) Build(wins []xwin.Window) (items []Item, stacks map[int]Stack)
 		app := b.Index.ByDesktopID(id)
 		if app == nil {
 			// A pinned application that is no longer installed. Skipping it
-			// silently is right: the dock should not carry a dead icon, and
-			// this is not a failure the user can act on from here.
+			// silently is right here: the dock should not carry a dead icon,
+			// and Build runs on every window change, so cmd/dock checks the
+			// pins against the index once at startup and says so there.
 			continue
 		}
 		pinned[app.ID] = true
@@ -103,8 +113,15 @@ func (b *Builder) Build(wins []xwin.Window) (items []Item, stacks map[int]Stack)
 	)
 	stacks[len(items)-1] = Stack{Kind: StackDownloads, Dir: b.DownloadsDir}
 
+	// A trash that cannot be counted is drawn empty, which is the lesser
+	// lie: the full icon over a trash that may hold nothing would invite a
+	// click to find out, and the popup says what went wrong either way.
 	trashIcon := icons.Trash
-	if b.trashCount() > 0 {
+	n, err := trashCounter(b.TrashDir)
+	if err != nil {
+		b.warn(fmt.Errorf("counting the trash: %w", err))
+	}
+	if n > 0 {
 		trashIcon = icons.TrashFull
 	}
 	items = append(items, Item{
@@ -117,11 +134,17 @@ func (b *Builder) Build(wins []xwin.Window) (items []Item, stacks map[int]Stack)
 	return items, stacks
 }
 
-// trashCount is a variable so tests can drive the icon choice without a
+// trashCounter is a variable so tests can drive the icon choice without a
 // trash directory on disk.
 var trashCounter = defaultTrashCount
 
-func (b *Builder) trashCount() int { return trashCounter(b.TrashDir) }
+func (b *Builder) warn(err error) {
+	if b.Warn != nil {
+		b.Warn(err)
+		return
+	}
+	log.Print(err)
+}
 
 // countWindows maps each application to how many windows it has open.
 func (b *Builder) countWindows(wins []xwin.Window) map[string]int {

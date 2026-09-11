@@ -5,8 +5,11 @@ package main
 // itself.
 
 import (
+	"errors"
 	"fmt"
 	"image"
+	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,6 +70,10 @@ func (d *dockApp) openStack(i int) error {
 	}
 	if d.popup != nil {
 		d.popup.close(d)
+		// Straight away, not once the new one is up: if building it fails,
+		// a closed popup left in d.popup has no surface and no window, and
+		// the next motion or expose event would paint into it.
+		d.popup = nil
 	}
 
 	rows, err := stackRows(st)
@@ -75,6 +82,9 @@ func (d *dockApp) openStack(i int) error {
 	}
 	p := &popup{rows: rows, hover: -1}
 	if err := p.create(d, d.places[i].CentreX); err != nil {
+		// Whatever create got as far as making would otherwise stay on the
+		// server until the dock exits.
+		p.close(d)
 		return err
 	}
 	d.popup = p
@@ -86,24 +96,32 @@ func stackRows(st dock.Stack) ([]popupRow, error) {
 	var (
 		entries []stack.Entry
 		err     error
+		name    string
 		action  string
 		target  string
 	)
 	switch st.Kind {
 	case dock.StackDownloads:
 		entries, err = stack.Recent(st.Dir, stackEntries)
-		action, target = "Open Downloads", st.Dir
+		name, action, target = "Downloads", "Open Downloads", st.Dir
 	case dock.StackTrash:
 		entries, err = stack.TrashEntries(st.Dir, stackEntries)
-		action, target = "Open Trash", trashURI
+		name, action, target = "Trash", "Open Trash", trashURI
 	case dock.NotAStack:
-		return nil, fmt.Errorf("not a stack")
+		return nil, errors.New("not a stack")
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		// A Downloads folder that has not been created yet is empty, the
+		// same way a trash that was never used is -- not unreadable.
+		err = nil
 	}
 	if err != nil {
-		// A missing or unreadable folder is worth showing rather than
-		// failing on: the action row still opens it, which is how the user
-		// finds out what is wrong.
-		entries = nil
+		// An unreadable folder is worth showing rather than failing on: the
+		// action row still opens it, which is how the user finds out what
+		// is wrong. The entries that could be read, if any, are still
+		// shown; the detail goes to the log, since a menu row has no room
+		// for it.
+		log.Printf("listing %s: %v", name, err)
 	}
 
 	rows := make([]popupRow, 0, len(entries)+2)
@@ -114,7 +132,13 @@ func stackRows(st dock.Stack) ([]popupRow, error) {
 		}
 		rows = append(rows, popupRow{label: shortLabel(label), target: e.Path})
 	}
-	if len(rows) == 0 {
+	switch {
+	case len(rows) > 0:
+	case err != nil:
+		// Not "Empty": that would be a claim about a folder nobody could
+		// read.
+		rows = append(rows, popupRow{label: "Can't read folder", dim: true})
+	default:
 		rows = append(rows, popupRow{label: "Empty", dim: true})
 	}
 	rows = append(rows, popupRow{label: action, target: target, action: true})
@@ -145,7 +169,6 @@ func (p *popup) create(d *dockApp, centreX float64) error {
 	if err != nil {
 		return fmt.Errorf("allocating a popup window id: %w", err)
 	}
-	p.win = win
 
 	cmap, err := xproto.NewColormapId(d.conn)
 	if err != nil {
@@ -172,14 +195,26 @@ func (p *popup) create(d *dockApp, centreX float64) error {
 	if err != nil {
 		return fmt.Errorf("creating the popup window: %w", err)
 	}
-	d.nameWindow(win, "dock-stack")
+	// Only now: close destroys p.win, and a window that was never created
+	// is a BadWindow to report rather than something to clean up.
+	p.win = win
+	if nameErr := d.nameWindow(win, "dock-stack"); nameErr != nil {
+		log.Printf("warning: %v", nameErr)
+	}
 
 	p.surf, err = xsurface.New(d.conn, win, d.visual.depth, p.w, p.h)
 	if err != nil {
 		return err
 	}
-	xproto.MapWindow(d.conn, win)
-	d.raise(win)
+	if mapErr := xproto.MapWindowChecked(d.conn, win).Check(); mapErr != nil {
+		return fmt.Errorf("mapping the popup: %w", mapErr)
+	}
+	// Checked, unlike the dock's raise on visibility changes: this is once
+	// per click, and a popup left underneath another window is a failure
+	// worth naming where it happened.
+	if raiseErr := d.raiseNow(win); raiseErr != nil {
+		log.Printf("raising the popup: %v", raiseErr)
+	}
 	p.grab(d)
 	return nil
 }
@@ -209,13 +244,37 @@ func (p *popup) measure(d *dockApp) (w, h int) {
 // owner_events is false, which is what makes outside clicks arrive at all:
 // with it true they would go to whichever window is under the cursor and
 // never reach us. Failure is not fatal, and costs only click-away
-// dismissal.
+// dismissal, which is why it is logged rather than returned.
 func (p *popup) grab(d *dockApp) {
 	reply, err := xproto.GrabPointer(d.conn, false, p.win,
 		uint16(xproto.EventMaskButtonPress|xproto.EventMaskPointerMotion),
 		xproto.GrabModeAsync, xproto.GrabModeAsync,
 		xproto.WindowNone, xproto.CursorNone, xproto.TimeCurrentTime).Reply()
-	p.grabbed = err == nil && reply != nil && reply.Status == xproto.GrabStatusSuccess
+	switch {
+	case err != nil:
+		log.Printf("grabbing pointer for stack: %v", err)
+	case reply == nil:
+		log.Print("grabbing pointer for stack: no reply from the X server")
+	case reply.Status != xproto.GrabStatusSuccess:
+		log.Printf("grabbing pointer for stack: %s", grabStatus(reply.Status))
+	default:
+		p.grabbed = true
+	}
+}
+
+// grabStatus names a GrabPointer status, which X reports as a bare number.
+func grabStatus(status byte) string {
+	switch status {
+	case xproto.GrabStatusAlreadyGrabbed:
+		return "another client has the pointer grabbed"
+	case xproto.GrabStatusInvalidTime:
+		return "invalid time"
+	case xproto.GrabStatusNotViewable:
+		return "the popup is not viewable"
+	case xproto.GrabStatusFrozen:
+		return "the pointer is frozen by another grab"
+	}
+	return fmt.Sprintf("status %d", status)
 }
 
 // rowAt maps a y coordinate to a row index, or -1.
@@ -265,7 +324,7 @@ func (p *popup) click(d *dockApp, e xproto.ButtonPressEvent) (show, leaving bool
 		return true, false, d.paint()
 	}
 	if openErr := openTarget(target); openErr != nil {
-		fmt.Fprintln(os.Stderr, "dock:", openErr)
+		log.Print(openErr)
 	}
 	return false, true, d.paint()
 }
@@ -304,21 +363,36 @@ func (p *popup) paint(d *dockApp) error {
 	return p.surf.Flush()
 }
 
+// close releases what the popup holds on the server. It is safe on a popup
+// that create only got part of the way through.
+//
+// The requests are checked: this happens once per click, and there is no
+// later moment at which a failure here could be matched to its cause. A
+// failure is logged rather than returned, because the popup is going away
+// either way and every caller has something more useful to do next.
 func (p *popup) close(d *dockApp) {
 	if p.grabbed {
-		xproto.UngrabPointer(d.conn, xproto.TimeCurrentTime)
+		if err := xproto.UngrabPointerChecked(d.conn, xproto.TimeCurrentTime).Check(); err != nil {
+			log.Printf("releasing the pointer grab: %v", err)
+		}
 		p.grabbed = false
 	}
 	if p.surf != nil {
-		p.surf.Close()
+		if err := p.surf.Close(); err != nil {
+			log.Printf("releasing the popup surface: %v", err)
+		}
 		p.surf = nil
 	}
 	if p.win != 0 {
-		xproto.DestroyWindow(d.conn, p.win)
+		if err := xproto.DestroyWindowChecked(d.conn, p.win).Check(); err != nil {
+			log.Printf("destroying the popup: %v", err)
+		}
 		p.win = 0
 	}
 	if p.colormap != 0 {
-		xproto.FreeColormap(d.conn, p.colormap)
+		if err := xproto.FreeColormapChecked(d.conn, p.colormap).Check(); err != nil {
+			log.Printf("freeing the popup colormap: %v", err)
+		}
 		p.colormap = 0
 	}
 }
@@ -331,7 +405,15 @@ func (p *popup) close(d *dockApp) {
 func openTarget(target string) error {
 	argv := []string{"xdg-open", target}
 	if target == trashURI {
-		if path, err := exec.LookPath("thunar"); err == nil {
+		path, err := exec.LookPath("thunar")
+		if err != nil {
+			// No thunar is the ordinary case on another desktop, and
+			// xdg-open is the fallback for exactly that; anything else is
+			// worth a line before falling back.
+			if !errors.Is(err, exec.ErrNotFound) {
+				log.Printf("looking for thunar: %v", err)
+			}
+		} else {
 			argv = []string{path, target}
 		}
 	}
@@ -344,21 +426,41 @@ func openTarget(target string) error {
 	if err != nil {
 		return fmt.Errorf("opening %s: %w", os.DevNull, err)
 	}
-	defer devNull.Close() //nolint:errcheck // the child holds its own dup
+	// The child holds its own duplicate once started; this is only the
+	// dock's copy, and it goes whether or not the start worked.
+	defer func() {
+		if closeErr := devNull.Close(); closeErr != nil {
+			log.Printf("closing %s: %v", os.DevNull, closeErr)
+		}
+	}()
 
 	//nolint:noctx,gosec // detached by design; the target comes from the user's own folders
 	cmd := exec.Command(bin, argv[1:]...)
+	// Not the dock's own stderr, tempting as xdg-open's explanation of a
+	// click that opened nothing is: xdg-open execs the handler, so the file
+	// manager would inherit the dock's stderr for its whole life, the way
+	// launch.SpawnDetached avoids for every application. A failed open
+	// still reaches the log, as the exit status the reaper below reports.
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = devNull, devNull, devNull
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if home, err := os.UserHomeDir(); err == nil {
+	home, homeErr := os.UserHomeDir()
+	if homeErr != nil {
+		// The handler inherits the dock's own directory instead, which
+		// matters only to one that resolves relative paths.
+		log.Printf("warning: starting %s outside the home directory: %v", filepath.Base(bin), homeErr)
+	} else {
 		cmd.Dir = home
 	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("opening %s: %w", filepath.Base(target), err)
 	}
-	// Reap it, or every file opened from a stack leaves a zombie behind.
+	// Reap it, or every file opened from a stack leaves a zombie behind. A
+	// failed exit is the handler saying it could not open the thing, which
+	// the click that asked for it will never otherwise hear about.
 	go func() {
-		_ = cmd.Wait() //nolint:errcheck // nothing can be done with the status
+		if err := cmd.Wait(); err != nil {
+			log.Printf("%s %s: %v", filepath.Base(bin), target, err)
+		}
 	}()
 	return nil
 }

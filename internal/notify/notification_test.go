@@ -1,6 +1,8 @@
 package notify
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -10,11 +12,186 @@ import (
 
 const fallback = 5 * time.Second
 
+// parse is Parse for the tests that look only at the result: problems are
+// covered by TestParseReportsProblems.
 func parse(req *Request) Notification {
 	if req.Hints == nil {
 		req.Hints = map[string]any{}
 	}
-	return Parse(req, fallback)
+	n, _ := Parse(req, fallback)
+	return n
+}
+
+func TestParseReportsNothingForAWellFormedRequest(t *testing.T) {
+	pixel := []any{int32(1), int32(1), int32(4), true, int32(8), int32(4), []byte{1, 2, 3, 255}}
+	_, problems := Parse(&Request{
+		AppName: "Mail", AppIcon: "thunderbird", Summary: "s", Body: "<b>b</b>",
+		Actions: []string{"default", "", "reply", "Reply"},
+		Hints: map[string]any{
+			"urgency": uint8(2), "value": int32(50), "resident": true, "category": "email",
+			"desktop-entry": "thunderbird", "image-data": pixel, "image-path": "file:///tmp/x.png",
+			"x-canonical-private-synchronous": "", "sound-name": "message", "transient": true,
+		},
+		ExpireTimeout: -1,
+	}, fallback)
+	if len(problems) != 0 {
+		t.Errorf("problems = %v, want none", problems)
+	}
+}
+
+func TestParseReportsProblems(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  Request
+		want string // in the one problem reported
+		ok   func(n *Notification) bool
+	}{
+		{name: "urgency out of range", req: Request{Hints: map[string]any{"urgency": uint8(9)}},
+			want: "urgency hint 9", ok: func(n *Notification) bool { return n.Urgency == Normal }},
+		{name: "urgency of the wrong type", req: Request{Hints: map[string]any{"urgency": "2"}},
+			want: `"urgency" is string`, ok: func(n *Notification) bool { return n.Urgency == Normal }},
+		{name: "urgency out of int64 range", req: Request{Hints: map[string]any{"urgency": uint64(1 << 63)}},
+			want: "out of range", ok: func(n *Notification) bool { return n.Urgency == Normal }},
+		{name: "value clamped", req: Request{Hints: map[string]any{"value": int32(150)}},
+			want: "value hint 150", ok: func(n *Notification) bool { return n.Value == 100 }},
+		{name: "odd actions", req: Request{Actions: []string{"a", "A", "dangling"}},
+			want: `"dangling" is ignored`, ok: func(n *Notification) bool { return len(n.Actions) == 1 }},
+		{name: "empty action key", req: Request{Actions: []string{"", "A"}},
+			want: "empty key", ok: func(n *Notification) bool { return len(n.Actions) == 0 }},
+		{name: "long action key", req: Request{Actions: []string{strings.Repeat("k", maxKeyBytes+1), "A"}},
+			want: "over the", ok: func(n *Notification) bool { return len(n.Actions) == 0 }},
+		{name: "action key not UTF-8", req: Request{Actions: []string{"\xff", "A"}},
+			want: "not UTF-8", ok: func(n *Notification) bool { return len(n.Actions) == 0 }},
+		{name: "sync of the wrong type", req: Request{Hints: map[string]any{"synchronous": true}},
+			want: `"synchronous" is bool`, ok: func(n *Notification) bool { return n.Sync == "" }},
+		{name: "malformed image-data", req: Request{Hints: map[string]any{"image-data": []any{int32(1)}}},
+			want: `"image-data"`, ok: func(n *Notification) bool { return n.Icon.Data == nil }},
+		{name: "file URI without a path", req: Request{AppIcon: "file://x.png"},
+			want: "no absolute path", ok: func(n *Notification) bool { return n.Icon.Path == "" }},
+		{name: "unparseable file URI", req: Request{AppIcon: "file://%zz/x.png"},
+			want: "app_icon", ok: func(n *Notification) bool { return n.Icon.Path == "" }},
+		{name: "relative path", req: Request{Hints: map[string]any{"image-path": "icons/x.png"}},
+			want: `"image-path"`, ok: func(n *Notification) bool { return n.Icon.Path == "" && n.Icon.Name == "" }},
+		{name: "string hint of the wrong type", req: Request{Hints: map[string]any{"category": int32(1)}},
+			want: `"category" is int32`, ok: func(n *Notification) bool { return n.Category == "" }},
+		{name: "bool hint of the wrong type", req: Request{Hints: map[string]any{"resident": uint8(1)}},
+			want: `"resident" is uint8`, ok: func(n *Notification) bool { return !n.Resident }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n, problems := Parse(&tc.req, fallback)
+			if len(problems) != 1 || !strings.Contains(problems[0].Error(), tc.want) {
+				t.Errorf("problems = %v, want one mentioning %q", problems, tc.want)
+			}
+			if !tc.ok(&n) {
+				t.Errorf("notification %+v does not fall back as it should", n)
+			}
+		})
+	}
+}
+
+func TestParseKeepsImageDataErrors(t *testing.T) {
+	_, problems := Parse(&Request{Hints: map[string]any{"image-data": "not a struct"}}, fallback)
+	if len(problems) != 1 || !errors.Is(problems[0], ErrImageData) {
+		t.Fatalf("problems = %v, want one wrapping ErrImageData", problems)
+	}
+}
+
+func TestParseReportsTooManyActionsOnce(t *testing.T) {
+	raw := make([]string, 0, 2*(maxActions+3))
+	for i := range maxActions + 3 {
+		raw = append(raw, fmt.Sprint("k", i), "label")
+	}
+	_, problems := Parse(&Request{Actions: raw}, fallback)
+	if len(problems) != 1 || !strings.Contains(problems[0].Error(), "only the first") {
+		t.Fatalf("problems = %v, want one saying the extra actions were dropped", problems)
+	}
+}
+
+func TestParseFallsBackToTheNextImageData(t *testing.T) {
+	pixel := []any{int32(1), int32(1), int32(4), true, int32(8), int32(4), []byte{1, 2, 3, 255}}
+	n, problems := Parse(&Request{Hints: map[string]any{"image-data": []any{}, "icon_data": pixel}}, fallback)
+	if n.Icon.Data == nil {
+		t.Error("the usable icon_data was not taken after image-data failed")
+	}
+	if len(problems) != 1 {
+		t.Errorf("problems = %v, want the broken image-data reported", problems)
+	}
+}
+
+// FuzzParse throws arbitrary requests at Parse and checks the promises it
+// makes to the renderer, whatever came in: clean, bounded text, levels in
+// range, and every problem a real error.
+func FuzzParse(f *testing.F) {
+	f.Add("Mail", "firefox", "Subject", "<b>Body</b>", "default\x00\x00reply\x00Reply", "urgency", uint8(0), int64(2), "x", int32(-1))
+	f.Add("", "file:///tmp/a.png", "", "&#x41;", "odd", "value", uint8(0), int64(500), "", int32(0))
+	f.Add("\u202e", "icons/x", "\x00", "", "", "synchronous", uint8(1), int64(0), "vol", int32(5000))
+	f.Add("a", "b", "c", "d", "\x00", "image-data", uint8(3), int64(1), "", int32(7))
+	f.Fuzz(func(t *testing.T, appName, appIcon, summary, body, actions, hintKey string, hintKind uint8, hintInt int64, hintStr string, timeout int32) {
+		var hint any
+		switch hintKind % 5 {
+		case 0:
+			hint = int32(hintInt)
+		case 1:
+			hint = hintStr
+		case 2:
+			hint = hintInt != 0
+		case 3:
+			hint = []any{int32(hintInt), int32(hintInt), int32(hintInt), true, int32(8), int32(4), []byte(hintStr)}
+		case 4:
+			hint = uint64(hintInt)
+		}
+		req := &Request{
+			AppName: appName, AppIcon: appIcon, Summary: summary, Body: body,
+			Actions: strings.Split(actions, "\x00"), ExpireTimeout: timeout,
+			Hints: map[string]any{hintKey: hint},
+		}
+		n, problems := Parse(req, fallback)
+
+		for _, s := range append([]string{n.AppName, n.Summary, n.Body, n.DesktopEntry, n.Category, n.Sync, n.Icon.Name}, labels(n.Actions)...) {
+			if !utf8.ValidString(s) {
+				t.Fatalf("invalid UTF-8 in %q", s)
+			}
+			for _, r := range s {
+				if unwanted(r) {
+					t.Fatalf("control character %U in %q", r, s)
+				}
+			}
+		}
+		switch {
+		case utf8.RuneCountInString(n.AppName) > maxNameRunes, utf8.RuneCountInString(n.Summary) > maxSummaryRunes,
+			utf8.RuneCountInString(n.Body) > maxBodyRunes:
+			t.Fatalf("text over its limit: %d/%d/%d runes", utf8.RuneCountInString(n.AppName),
+				utf8.RuneCountInString(n.Summary), utf8.RuneCountInString(n.Body))
+		case len(n.Actions) > maxActions:
+			t.Fatalf("%d actions kept", len(n.Actions))
+		case n.Urgency > Critical:
+			t.Fatalf("urgency %d", n.Urgency)
+		case n.Value < -1 || n.Value > 100:
+			t.Fatalf("value %d", n.Value)
+		case n.Timeout < 0:
+			t.Fatalf("timeout %v", n.Timeout)
+		case n.Icon.Path != "" && !strings.HasPrefix(n.Icon.Path, "/"):
+			t.Fatalf("icon path %q is not absolute", n.Icon.Path)
+		}
+		for _, a := range n.Actions {
+			if a.Key == "" || len(a.Key) > maxKeyBytes || !utf8.ValidString(a.Key) || utf8.RuneCountInString(a.Label) > maxLabelRunes {
+				t.Fatalf("unusable action %+v kept", a)
+			}
+		}
+		for i, p := range problems {
+			if p == nil {
+				t.Fatalf("problem %d is nil", i)
+			}
+		}
+	})
+}
+
+func labels(actions []Action) []string {
+	out := make([]string, 0, len(actions))
+	for _, a := range actions {
+		out = append(out, a.Label)
+	}
+	return out
 }
 
 func TestParseCleansText(t *testing.T) {

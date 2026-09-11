@@ -57,6 +57,8 @@ func drawRow(img *image.RGBA, f *faces, mt *metrics, row Row, top int, selected 
 	switch {
 	case selected:
 		nameCol, detailCol = colNameSel, colDetailSel
+	case row.CalcError:
+		nameCol = colCalcError
 	case row.App == nil:
 		// The calculator row, unselected.
 		nameCol = colCalc

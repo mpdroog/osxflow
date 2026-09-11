@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -146,6 +147,34 @@ func TestLoadImageFileRejects(t *testing.T) {
 		if _, err := LoadImageFile(path); err == nil {
 			t.Errorf("%s: loaded, want an error", name)
 		}
+	}
+}
+
+// The everyday failures -- no such file, a format not understood -- stay
+// recognisable through the wrapping, so the daemon can fall back quietly
+// for them and still report a file that is really broken.
+func TestLoadImageFileErrorsKeepTheirCause(t *testing.T) {
+	dir := t.TempDir()
+	svg := filepath.Join(dir, "icon.svg")
+	if err := os.WriteFile(svg, []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadImageFile(filepath.Join(dir, "nope.png")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("missing file: err = %v, want fs.ErrNotExist", err)
+	}
+	if _, err := LoadImageFile(svg); !errors.Is(err, image.ErrFormat) {
+		t.Errorf("svg: err = %v, want image.ErrFormat", err)
+	}
+	truncated := filepath.Join(dir, "cut.png")
+	whole, err := os.ReadFile(writePNG(t, 8, 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(truncated, whole[:len(whole)/2], 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if _, err := LoadImageFile(truncated); err == nil || errors.Is(err, fs.ErrNotExist) || errors.Is(err, image.ErrFormat) {
+		t.Errorf("truncated PNG: err = %v, want a failure that is neither missing nor unknown format", err)
 	}
 }
 

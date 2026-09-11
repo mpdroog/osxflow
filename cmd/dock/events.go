@@ -3,8 +3,7 @@ package main
 // Turning X events into dock state.
 
 import (
-	"fmt"
-	"os"
+	"log"
 
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xproto"
@@ -230,7 +229,7 @@ func (d *dockApp) click(e xproto.ButtonPressEvent) (show, leaving bool, err erro
 		return false, true, nil
 	case dock.KindStack:
 		if err := d.openStack(i); err != nil {
-			fmt.Fprintln(os.Stderr, "dock:", err)
+			log.Print(err)
 		}
 		return true, false, nil
 	case dock.KindSeparator:
@@ -247,18 +246,22 @@ func (d *dockApp) click(e xproto.ButtonPressEvent) (show, leaving bool, err erro
 func (d *dockApp) activate(i int) {
 	app := d.index.ByDesktopID(d.items[i].DesktopID)
 	if app == nil {
+		// Build only makes items for applications the index knows, so this
+		// is a bug rather than a missing app -- and a click that does
+		// nothing at all must at least say why.
+		log.Printf("no application for %s", d.items[i].DesktopID)
 		return
 	}
 	result, err := d.opener.Open(app)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "dock:", err)
+		log.Print(err)
 		return
 	}
 	if d.verbose {
 		if result.Focused {
-			fmt.Printf("dock: focused %s (%s)\n", app.Name, result.Confidence)
+			log.Printf("focused %s (%s)", app.Name, result.Confidence)
 		} else {
-			fmt.Printf("dock: started %s\n", app.Name)
+			log.Printf("started %s", app.Name)
 		}
 	}
 }

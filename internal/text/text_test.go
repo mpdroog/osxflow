@@ -1,8 +1,11 @@
 package text
 
 import (
+	"errors"
 	"image"
 	"image/color"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -36,6 +39,66 @@ func TestLoadReportsEveryPathItTried(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not name %q", err, want)
 		}
+	}
+}
+
+func TestLoadWrapsErrNoFont(t *testing.T) {
+	_, _, err := Load([]string{"/nonexistent/a.ttf"})
+	if !errors.Is(err, ErrNoFont) {
+		t.Errorf("error = %v, want it to wrap ErrNoFont", err)
+	}
+}
+
+// A candidate that is missing is expected and not worth a word; one that
+// is there and broken is a fault, and every such fault must be in the
+// error -- not just the last one.
+func TestLoadReportsEveryBrokenCandidate(t *testing.T) {
+	dir := t.TempDir()
+	notAFont := filepath.Join(dir, "broken.ttf")
+	if err := os.WriteFile(notAFont, []byte("not a font"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alsoNotAFont := filepath.Join(dir, "broken2.ttf")
+	if err := os.WriteFile(alsoNotAFont, []byte("nor this"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unreadable := filepath.Join(dir, "a-directory.ttf")
+	if err := os.Mkdir(unreadable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "missing.ttf")
+
+	_, _, err := Load([]string{notAFont, unreadable, missing, alsoNotAFont})
+	if !errors.Is(err, ErrNoFont) {
+		t.Fatalf("error = %v, want it to wrap ErrNoFont", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{"parsing " + notAFont, "parsing " + alsoNotAFont, "reading " + unreadable} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error does not contain %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "reading "+missing) {
+		t.Errorf("error reports the missing candidate as a failure:\n%s", msg)
+	}
+}
+
+// A broken candidate ahead of a good one must not stop the good one
+// loading, and is not reported once it has.
+func TestLoadSkipsABrokenCandidate(t *testing.T) {
+	broken := filepath.Join(t.TempDir(), "broken.ttf")
+	if err := os.WriteFile(broken, []byte("not a font"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Load(Candidates); err != nil {
+		t.Skipf("no usable system font: %v", err)
+	}
+	_, path, err := Load(append([]string{broken}, Candidates...))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if path == broken {
+		t.Errorf("Load returned the broken candidate")
 	}
 }
 

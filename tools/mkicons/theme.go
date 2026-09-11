@@ -12,7 +12,9 @@ package main
 // walker following Directories= would never discover.
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -66,10 +68,14 @@ func better(a, b *candidate) bool {
 // desktop, and reading the active theme out of xfconf at build time would
 // add a way for the build to produce different output on different days
 // without anybody asking it to.
-func themeChain() []string {
+//
+// No home directory is an error rather than a reason to skip the user's
+// themes: WhiteSur is installed under ~/.local, so leaving those out would
+// quietly build the dock with the wrong icons.
+func themeChain() ([]string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		home = "~"
+		return nil, fmt.Errorf("locating the user's icon themes: %w", err)
 	}
 	themes := []string{
 		"WhiteSur-dark", // the active theme
@@ -91,21 +97,35 @@ func themeChain() []string {
 	// Loose files that belong to no theme at all. Plenty of packages still
 	// drop a PNG here and name it from Icon=.
 	dirs = append(dirs, "/usr/share/pixmaps")
-	return dirs
+	return dirs, nil
+}
+
+// indexer collects the icon index across the theme chain.
+//
+// Nothing that goes wrong while walking a theme stops the build: an
+// unreadable directory costs the icons in it, and the build reports how
+// many icons it did and did not produce at the end. But every such failure
+// is passed to warn, so a theme that half-indexed says why.
+type indexer struct {
+	index map[string]candidate
+	warn  func(error)
+
+	// dangling counts symlinks whose target does not exist. Icon themes
+	// ship them by the hundred -- WhiteSur links names to icons it does not
+	// include -- so they are counted rather than listed.
+	dangling int
 }
 
 // buildIndex maps an icon name to the best file found for it.
-func buildIndex(dirs []string) (map[string]candidate, error) {
-	index := make(map[string]candidate, 4096)
+func buildIndex(dirs []string, warn func(error)) (*indexer, error) {
+	ix := &indexer{index: make(map[string]candidate, 4096), warn: warn}
 	for i, dir := range dirs {
-		if err := walkTheme(dir, i, index); err != nil {
-			return nil, err
-		}
+		ix.walkTheme(dir, i)
 	}
-	if len(index) == 0 {
+	if len(ix.index) == 0 {
 		return nil, fmt.Errorf("no icon files found; searched %v", dirs)
 	}
-	return index, nil
+	return ix, nil
 }
 
 // walkTheme indexes one theme directory.
@@ -115,50 +135,60 @@ func buildIndex(dirs []string) (map[string]candidate, error) {
 // Cycles are guarded by remembering the resolved path of each directory
 // entered, so a theme that links to its own parent is visited once rather
 // than forever.
-func walkTheme(root string, theme int, index map[string]candidate) error {
+func (ix *indexer) walkTheme(root string, theme int) {
 	seen := make(map[string]bool)
-	var walk func(dir string, depth int) error
-	walk = func(dir string, depth int) error {
+	var walk func(dir string, depth int)
+	walk = func(dir string, depth int) {
 		// A theme is a handful of levels deep. The limit is a backstop
 		// against a symlink arrangement the cycle check cannot see, such
 		// as two directories linking to each other through /proc.
 		const maxDepth = 8
 		if depth > maxDepth {
-			return nil
+			ix.warn(fmt.Errorf("%s: more than %d levels deep; not indexed", dir, maxDepth))
+			return
 		}
-		// A dangling link, or a theme that is not installed: not an error,
-		// just a directory that is not there. Most of the chain is absent
-		// on any given machine.
 		resolved, err := filepath.EvalSymlinks(dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			// A theme that is not installed: not an error, just a
+			// directory that is not there. Most of the chain is absent on
+			// any given machine.
+			return
+		}
 		if err != nil {
-			return nil //nolint:nilerr // an absent theme is the normal case
+			ix.warn(fmt.Errorf("resolving %s: %w", dir, err))
+			return
 		}
 		if seen[resolved] {
-			return nil
+			return
 		}
 		seen[resolved] = true
 
+		// An unreadable directory costs its icons, not the build. ReadDir
+		// still returns the entries it read before failing, and those are
+		// indexed.
 		entries, err := os.ReadDir(dir)
 		if err != nil {
-			return nil //nolint:nilerr // an unreadable directory costs its icons, not the build
+			ix.warn(fmt.Errorf("reading %s: %w", dir, err))
 		}
 		for _, e := range entries {
 			path := filepath.Join(dir, e.Name())
 			info, err := os.Stat(path) // Stat, not e.Info: follows symlinks
+			if errors.Is(err, fs.ErrNotExist) {
+				ix.dangling++
+				continue
+			}
 			if err != nil {
+				ix.warn(err)
 				continue
 			}
 			if info.IsDir() {
-				if err := walk(path, depth+1); err != nil {
-					return err
-				}
+				walk(path, depth+1)
 				continue
 			}
-			add(index, path, theme, dir)
+			add(ix.index, path, theme, dir)
 		}
-		return nil
 	}
-	return walk(root, 0)
+	walk(root, 0)
 }
 
 func add(index map[string]candidate, path string, theme int, dir string) {
@@ -211,38 +241,55 @@ func dirSize(dir string) int {
 		if x, _, ok := strings.Cut(part, "x"); ok {
 			part = x
 		}
-		if n, err := strconv.Atoi(part); err == nil && n > best {
-			best = n
+		n, err := strconv.Atoi(part)
+		if err != nil {
+			// Not a size segment. Most are not -- "apps", "WhiteSur-dark",
+			// "share" -- so a segment that is not a number is the expected
+			// case here, not a failure.
+			continue
 		}
+		best = max(best, n)
 	}
 	return best
 }
+
+// errNoIcon reports an Icon= value that no file serves. Plenty of entries
+// name icons the installed themes do not have; that is counted, not
+// warned about.
+var errNoIcon = errors.New("no icon file")
 
 // resolve turns an Icon= value into a file on disk.
 //
 // The value is usually a bare theme name ("firefox"), but the spec allows
 // an absolute path, and a handful of entries give a filename complete with
 // extension. All three appear on this machine.
-func resolve(icon string, index map[string]candidate) (string, bool) {
+//
+// The error is errNoIcon when nothing serves the name. Anything else is a
+// file that exists but could not be looked at, which is worth a warning.
+func resolve(icon string, index map[string]candidate) (string, error) {
 	if icon == "" {
-		return "", false
+		return "", errNoIcon
 	}
 	if filepath.IsAbs(icon) {
-		if _, err := os.Stat(icon); err == nil {
-			return icon, true
+		_, err := os.Stat(icon)
+		switch {
+		case err == nil:
+			return icon, nil
+		case !errors.Is(err, fs.ErrNotExist):
+			return "", fmt.Errorf("icon %s: %w", icon, err)
 		}
 		// An absolute path that does not exist can still name an icon that
 		// does: fall through and try its basename.
 		icon = filepath.Base(icon)
 	}
 	if c, ok := index[icon]; ok {
-		return c.path, true
+		return c.path, nil
 	}
 	// Trim an extension the entry should not have included.
 	if ext := filepath.Ext(icon); ext != "" {
 		if c, ok := index[strings.TrimSuffix(icon, ext)]; ok {
-			return c.path, true
+			return c.path, nil
 		}
 	}
-	return "", false
+	return "", errNoIcon
 }

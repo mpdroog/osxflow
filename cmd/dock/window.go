@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xproto"
@@ -92,8 +93,14 @@ func (d *dockApp) createDockWindow(width, height, x, y int) error {
 		return fmt.Errorf("creating the dock window: %w", err)
 	}
 
-	d.nameWindow(win, "dock")
-	d.setDockType(win)
+	// Both are for other programs' benefit rather than the dock's, so a
+	// failure is worth a line but not a failed start.
+	if nameErr := d.nameWindow(win, "dock"); nameErr != nil {
+		log.Printf("warning: %v", nameErr)
+	}
+	if typeErr := d.setDockType(win); typeErr != nil {
+		log.Printf("warning: %v", typeErr)
+	}
 	return nil
 }
 
@@ -130,7 +137,9 @@ func (d *dockApp) createTriggerWindow(width, height, x, y int) error {
 	if err != nil {
 		return fmt.Errorf("creating the reveal trigger: %w", err)
 	}
-	d.nameWindow(win, "dock-trigger")
+	if nameErr := d.nameWindow(win, "dock-trigger"); nameErr != nil {
+		log.Printf("warning: %v", nameErr)
+	}
 	return nil
 }
 
@@ -139,12 +148,17 @@ func (d *dockApp) createTriggerWindow(width, height, x, y int) error {
 // An override-redirect window is invisible to the window manager, but not
 // to xwininfo, xprop or a screen recorder, and an unnamed window is a
 // nuisance to anybody debugging their own desktop.
-func (d *dockApp) nameWindow(win xproto.Window, name string) {
-	xproto.ChangeProperty(d.conn, xproto.PropModeReplace, win,
-		xproto.AtomWmName, xproto.AtomString, 8, geom.U32(len(name)), []byte(name))
+func (d *dockApp) nameWindow(win xproto.Window, name string) error {
+	if err := xproto.ChangePropertyChecked(d.conn, xproto.PropModeReplace, win,
+		xproto.AtomWmName, xproto.AtomString, 8, geom.U32(len(name)), []byte(name)).Check(); err != nil {
+		return fmt.Errorf("setting WM_NAME on %s: %w", name, err)
+	}
 	class := append([]byte(name+"\x00"), []byte("Osxflow\x00")...)
-	xproto.ChangeProperty(d.conn, xproto.PropModeReplace, win,
-		xproto.AtomWmClass, xproto.AtomString, 8, geom.U32(len(class)), class)
+	if err := xproto.ChangePropertyChecked(d.conn, xproto.PropModeReplace, win,
+		xproto.AtomWmClass, xproto.AtomString, 8, geom.U32(len(class)), class).Check(); err != nil {
+		return fmt.Errorf("setting WM_CLASS on %s: %w", name, err)
+	}
+	return nil
 }
 
 // setDockType declares _NET_WM_WINDOW_TYPE_DOCK.
@@ -153,23 +167,29 @@ func (d *dockApp) nameWindow(win xproto.Window, name string) {
 // changes no behaviour. It is set because other software reads it: a
 // screen-sharing tool or an accessibility client asking what this window
 // is should get "a dock" rather than nothing.
-func (d *dockApp) setDockType(win xproto.Window) {
+func (d *dockApp) setDockType(win xproto.Window) error {
 	typeAtom, err := atom(d.conn, "_NET_WM_WINDOW_TYPE")
 	if err != nil {
-		return
+		return fmt.Errorf("setting the window type: %w", err)
 	}
 	dockAtom, err := atom(d.conn, "_NET_WM_WINDOW_TYPE_DOCK")
 	if err != nil {
-		return
+		return fmt.Errorf("setting the window type: %w", err)
 	}
-	xproto.ChangeProperty(d.conn, xproto.PropModeReplace, win,
-		typeAtom, xproto.AtomAtom, 32, 1, atomBytes(dockAtom))
+	if err := xproto.ChangePropertyChecked(d.conn, xproto.PropModeReplace, win,
+		typeAtom, xproto.AtomAtom, 32, 1, atomBytes(dockAtom)).Check(); err != nil {
+		return fmt.Errorf("setting _NET_WM_WINDOW_TYPE: %w", err)
+	}
+	return nil
 }
 
 func atom(conn *xgb.Conn, name string) (xproto.Atom, error) {
 	reply, err := xproto.InternAtom(conn, false, geom.U16(len(name)), name).Reply()
 	if err != nil {
 		return 0, fmt.Errorf("interning %s: %w", name, err)
+	}
+	if reply == nil {
+		return 0, fmt.Errorf("interning %s: no reply from the X server", name)
 	}
 	return reply.Atom, nil
 }
@@ -184,14 +204,26 @@ func atomBytes(a xproto.Atom) []byte {
 
 // raise puts a window at the top of the stacking order. Override-redirect
 // windows are not kept there by anybody else.
+//
+// Unchecked, because it is sent from the event handlers on the path the
+// user is waiting on; a failure arrives later as an X error, which the
+// event loop logs.
 func (d *dockApp) raise(win xproto.Window) {
 	xproto.ConfigureWindow(d.conn, win,
 		xproto.ConfigWindowStackMode, []uint32{xproto.StackModeAbove})
 }
 
+// raiseNow is raise for a one-off, where waiting for the answer costs
+// nothing and a failure is best reported where it happened.
+func (d *dockApp) raiseNow(win xproto.Window) error {
+	return xproto.ConfigureWindowChecked(d.conn, win,
+		xproto.ConfigWindowStackMode, []uint32{xproto.StackModeAbove}).Check()
+}
+
 // moveWindow repositions a window without redrawing it, which is how the
 // slide works: the panel's pixels do not change as it comes and goes, only
-// where they are.
+// where they are. Unchecked for the same reason as raise, and more so: it
+// is sent on every frame of the slide.
 func (d *dockApp) moveWindow(win xproto.Window, x, y int) {
 	xproto.ConfigureWindow(d.conn, win,
 		xproto.ConfigWindowX|xproto.ConfigWindowY,

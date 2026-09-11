@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"image"
+	"log"
 	"os"
 	"slices"
 	"time"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/mpdroog/osxflow/internal/desktop"
 	"github.com/mpdroog/osxflow/internal/dock"
+	"github.com/mpdroog/osxflow/internal/errlog"
 	"github.com/mpdroog/osxflow/internal/geom"
 	"github.com/mpdroog/osxflow/internal/icons"
 	"github.com/mpdroog/osxflow/internal/launch"
@@ -33,8 +35,14 @@ import (
 )
 
 func main() {
+	// Before anything else, so that every line -- including the ones
+	// newDock logs while it is still starting -- is marked as the dock's in
+	// a session log shared with every other program started at login.
+	log.SetPrefix("dock: ")
+	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
+
 	if err := start(); err != nil {
-		fmt.Fprintln(os.Stderr, "dock:", err)
+		log.Print(err)
 		os.Exit(1)
 	}
 }
@@ -112,6 +120,21 @@ type dockApp struct {
 
 	clientList xproto.Atom
 	verbose    bool
+
+	// lim bounds the errors that can arrive by the dozen: X protocol errors
+	// for unchecked requests, which a failing upload produces several of per
+	// frame, and the window-list failures below.
+	lim *errlog.Limiter
+
+	// listErr and buildErr are the last failure refreshItems reported, so a
+	// failure that persists is said once rather than on every change to the
+	// window list, and its clearing is said too.
+	listErr  string
+	buildErr string
+
+	// buildWarnings collects what the Builder could not find out during one
+	// Build; see refreshItems.
+	buildWarnings []error
 }
 
 type fallbackKey struct {
@@ -133,6 +156,7 @@ func newDock(scaleOverride float64, verbose bool) (*dockApp, error) {
 		zoom:      dock.Anim{Tau: 0.045},
 		hover:     -1,
 		fallbacks: make(map[fallbackKey]*image.RGBA),
+		lim:       &errlog.Limiter{Burst: 5, Per: time.Minute},
 	}
 	d.screen = xproto.Setup(d.conn).DefaultScreen(d.conn)
 
@@ -144,21 +168,36 @@ func newDock(scaleOverride float64, verbose bool) (*dockApp, error) {
 	}
 	d.visual = visual
 
-	d.th = newTheme(scale.Detect(X, scaleOverride))
+	// The factor is always usable (1 when nothing answers); the error says
+	// why it may not match the desktop, which is worth a line but not a
+	// failed start.
+	factor, scaleErr := scale.Detect(X, scaleOverride)
+	if scaleErr != nil {
+		log.Printf("scale: %v", scaleErr)
+	}
+	d.th = newTheme(factor)
 	if d.faces, err = loadFaces(d.th); err != nil {
 		d.conn.Close()
 		return nil, err
 	}
 
 	if missing := icons.Verify([]string{icons.Downloads, icons.Trash, icons.TrashFull}); missing != nil {
-		fmt.Fprintln(os.Stderr, "dock: warning:", missing)
+		log.Printf("warning: %v", missing)
 	}
 
 	apps, problems := desktop.Scan()
 	for _, p := range problems {
-		fmt.Fprintln(os.Stderr, "dock: warning:", p)
+		log.Printf("warning: %v", p)
 	}
 	d.index = launch.NewIndex(apps)
+	// Build skips a pin whose application is gone without a word, because
+	// it runs on every window change. The word belongs here, once: the
+	// list in theme.go has drifted from what is installed.
+	for _, id := range pinnedIDs {
+		if d.index.ByDesktopID(id) == nil {
+			log.Printf("warning: pinned %s is not installed", id)
+		}
+	}
 
 	server, err := xwin.NewX11With(X)
 	if err != nil {
@@ -169,11 +208,24 @@ func newDock(scaleOverride float64, verbose bool) (*dockApp, error) {
 	d.server = server
 	d.opener = launch.New(server)
 
+	// Neither folder is worth refusing to start over. A downloads folder
+	// that is not the configured one still comes back as ~/Downloads; a
+	// trash that cannot be found leaves the Builder to say so as the row is
+	// built.
+	trashDir, trashErr := stack.TrashDir()
+	if trashErr != nil {
+		log.Printf("warning: %v", trashErr)
+	}
+	downloadsDir, downloadsErr := stack.DownloadsDir()
+	if downloadsErr != nil {
+		log.Printf("warning: %v", downloadsErr)
+	}
 	d.builder = &dock.Builder{
 		PinnedIDs:    pinnedIDs,
 		Index:        d.index,
-		TrashDir:     stack.TrashDir(),
-		DownloadsDir: stack.DownloadsDir(),
+		TrashDir:     trashDir,
+		DownloadsDir: downloadsDir,
+		Warn:         func(err error) { d.buildWarnings = append(d.buildWarnings, err) },
 	}
 
 	d.refreshItems()
@@ -185,7 +237,7 @@ func newDock(scaleOverride float64, verbose bool) (*dockApp, error) {
 	// The root window tells us when the set of open windows changes, which
 	// is what keeps the running indicators honest without polling.
 	if watchErr := d.watchRoot(); watchErr != nil {
-		fmt.Fprintln(os.Stderr, "dock: warning:", watchErr)
+		log.Printf("warning: %v", watchErr)
 		// Without the notification the row can only be kept honest by
 		// asking, and the moment worth asking in is just before the dock
 		// appears.
@@ -218,8 +270,11 @@ func (d *dockApp) createWindows() error {
 		return err
 	}
 
-	xproto.MapWindow(d.conn, d.win)
-	xproto.MapWindow(d.conn, d.trigger)
+	for _, win := range []xproto.Window{d.win, d.trigger} {
+		if mapErr := xproto.MapWindowChecked(d.conn, win).Check(); mapErr != nil {
+			return fmt.Errorf("mapping window 0x%x: %w", win, mapErr)
+		}
+	}
 	return d.paint()
 }
 
@@ -247,15 +302,24 @@ func (d *dockApp) refreshItems() bool {
 		// Losing the window list costs the running indicators, not the
 		// dock. Carrying on with an empty list would blank every dot; using
 		// the previous one is closer to the truth.
-		if d.verbose {
-			fmt.Fprintln(os.Stderr, "dock: listing windows:", err)
+		//
+		// This runs on every change to the window list, so a failure that
+		// persists is said once, and again only when it changes or clears.
+		if msg := err.Error(); msg != d.listErr {
+			d.lim.Printf("windows", "listing windows: %v", err)
+			d.listErr = msg
 		}
 		if d.items != nil {
 			return false
 		}
 		wins = nil
+	} else if d.listErr != "" {
+		log.Print("window list recovered")
+		d.listErr = ""
 	}
+	d.buildWarnings = d.buildWarnings[:0]
 	items, stacks := d.builder.Build(wins)
+	d.reportBuild()
 	for i := range items {
 		if short, ok := displayNames[items[i].DesktopID]; ok {
 			items[i].Name = short
@@ -264,6 +328,24 @@ func (d *dockApp) refreshItems() bool {
 	changed := !slices.Equal(d.items, items)
 	d.items, d.stacks = items, stacks
 	return changed
+}
+
+// reportBuild logs what the last Build warned about, on the same terms as
+// a failing window list: once while it persists, and once when it clears.
+func (d *dockApp) reportBuild() {
+	var msg string
+	if len(d.buildWarnings) > 0 {
+		msg = errors.Join(d.buildWarnings...).Error()
+	}
+	switch msg {
+	case d.buildErr:
+		return
+	case "":
+		log.Printf("resolved: %s", d.buildErr)
+	default:
+		d.lim.Printf("build", "%s", msg)
+	}
+	d.buildErr = msg
 }
 
 // resizeIfNeeded grows or shrinks the window when the number of items
@@ -276,11 +358,21 @@ func (d *dockApp) resizeIfNeeded() error {
 	d.winW = want
 	d.winX = (int(d.screen.WidthInPixels) - d.winW) / 2
 
-	xproto.ConfigureWindow(d.conn, d.win,
+	// Checked, unlike the slide: this happens when an application starts
+	// or stops, not sixty times a second, and a window that did not take
+	// its new width would have the new surface copied into it wrongly.
+	// Logged rather than returned, though. Both of these act on the dock's
+	// own ids and next to never fail; if one does, a dock drawn at the old
+	// width until the next change is far better than no dock at all, which
+	// is what returning up the event loop would make of it.
+	if err := xproto.ConfigureWindowChecked(d.conn, d.win,
 		xproto.ConfigWindowX|xproto.ConfigWindowWidth,
-		[]uint32{geom.I32AsU32(d.winX), geom.U32(d.winW)})
-
-	d.surf.Close()
+		[]uint32{geom.I32AsU32(d.winX), geom.U32(d.winW)}).Check(); err != nil {
+		log.Printf("resizing the dock: %v", err)
+	}
+	if err := d.surf.Close(); err != nil {
+		log.Printf("releasing the old surface: %v", err)
+	}
 	surf, err := xsurface.New(d.conn, d.win, d.visual.depth, d.winW, d.th.winH)
 	if err != nil {
 		return err
@@ -309,7 +401,13 @@ const hideDelay = 350 * time.Millisecond
 
 func (d *dockApp) run() error {
 	events := make(chan xgb.Event, 64)
-	go d.readEvents(events)
+	// errc says why the reader stopped; done stops a reader that is still
+	// running when this loop returns with an error of its own, which would
+	// otherwise block for ever on a send nobody receives.
+	errc := make(chan error, 1)
+	done := make(chan struct{})
+	defer close(done)
+	go d.readEvents(events, errc, done)
 
 	var (
 		ticker *time.Ticker
@@ -357,7 +455,11 @@ func (d *dockApp) run() error {
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				return nil // the connection closed: the session is ending
+				// The connection closed under the dock. At logout that is the
+				// session ending, but it is also what a crashed server looks
+				// like, and a dock that vanished with status 0 and no word
+				// would be a mystery; it says so and exits with an error.
+				return <-errc
 			}
 			for _, e := range coalesce(ev, events) {
 				show, hidden, err := d.handle(e)
@@ -463,25 +565,35 @@ func coalesce(first xgb.Event, queued <-chan xgb.Event) []xgb.Event {
 }
 
 // readEvents pumps X events into a channel so the main loop can wait on
-// them and on a timer at the same time.
+// them and on a timer at the same time. It stops when the connection ends,
+// saying why on errc before closing out, or when done closes.
 //
 // xgb's connection is safe for concurrent use, so requests still go
 // straight from the main goroutine; only the blocking read lives here.
-func (d *dockApp) readEvents(out chan<- xgb.Event) {
+func (d *dockApp) readEvents(out chan<- xgb.Event, errc chan<- error, done <-chan struct{}) {
 	defer close(out)
 	for {
-		ev, err := d.conn.WaitForEvent()
-		if err != nil {
-			// A protocol error refers to a request that has already
-			// failed; the connection is still good and the dock carries on.
-			if d.verbose {
-				fmt.Fprintln(os.Stderr, "dock: x error:", err)
-			}
+		ev, xerr := d.conn.WaitForEvent()
+		if xerr != nil {
+			// A protocol error answers an unchecked request sent some time
+			// ago -- a frame's PutImage, a raise, a step of the slide. The
+			// connection is still good and the dock carries on, but it says
+			// so, always: through the limiter, keyed by the kind of error,
+			// because a failing upload is half a dozen of these per frame.
+			d.lim.Printf(fmt.Sprintf("%T", xerr), "X error: %v", xerr)
 			continue
 		}
 		if ev == nil {
-			return // the server went away
+			// Both nil is xgb's only word that the connection has ended. A
+			// read failure behind it has already gone to xgb's own logger;
+			// nothing more of it reaches us than this.
+			errc <- errors.New("lost the connection to the X server")
+			return
 		}
-		out <- ev
+		select {
+		case out <- ev:
+		case <-done:
+			return
+		}
 	}
 }

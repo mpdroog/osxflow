@@ -10,6 +10,7 @@
 package notify
 
 import (
+	"fmt"
 	"image"
 	"math"
 	"net/url"
@@ -166,40 +167,62 @@ const (
 	maxRawBody = 64 << 10
 )
 
-// Parse turns a Notify call into a Notification. It never fails: anything
-// malformed is dropped, and what is left is still worth showing.
+// Parse turns a Notify call into a Notification.
+//
+// It always returns something worth showing: anything malformed is left
+// out, clamped or replaced by its default, and what is left is drawn. What
+// was left out comes back as problems, one per thing the sender got wrong,
+// for the daemon to log -- a sender whose image never appears should be
+// able to find out why. Lengths are the exception: clipping a long summary
+// is the renderer's design, not the sender's mistake.
 //
 // defaultTimeout is what an expire_timeout of -1 means, which is the
 // server's choice.
-func Parse(req *Request, defaultTimeout time.Duration) Notification {
-	h := req.Hints
+func Parse(req *Request, defaultTimeout time.Duration) (Notification, []error) {
+	p := parser{h: req.Hints}
 	n := Notification{
 		AppName:      clip(singleLine(clean(req.AppName)), maxNameRunes),
 		Summary:      clip(singleLine(clean(req.Summary)), maxSummaryRunes),
 		Body:         clip(StripMarkup(truncateBytes(req.Body, maxRawBody)), maxBodyRunes),
-		Icon:         parseIcon(req.AppIcon, h),
-		Actions:      parseActions(req.Actions),
+		Actions:      p.actions(req.Actions),
 		Urgency:      Normal,
-		Resident:     boolHint(h, "resident"),
-		DesktopEntry: strings.TrimSuffix(clip(singleLine(stringHint(h, "desktop-entry")), maxNameRunes), ".desktop"),
-		Category:     clip(singleLine(stringHint(h, "category")), maxNameRunes),
+		Resident:     p.boolHint("resident"),
+		DesktopEntry: strings.TrimSuffix(clip(singleLine(p.stringHint("desktop-entry")), maxNameRunes), ".desktop"),
+		Category:     clip(singleLine(p.stringHint("category")), maxNameRunes),
 		Value:        -1,
 	}
-	n.Sync = syncKey(h, n.AppName)
+	n.Icon = p.icon(req.AppIcon)
+	n.Sync = p.syncKey(n.AppName)
 
-	if u, ok := intHint(h, "urgency"); ok {
+	if u, ok := p.intHint("urgency"); ok {
 		switch u {
 		case 0:
 			n.Urgency = Low
+		case 1:
 		case 2:
 			n.Urgency = Critical
+		default:
+			p.addf("urgency hint %d is not 0, 1 or 2; using normal", u)
 		}
 	}
-	if v, ok := intHint(h, "value"); ok {
+	if v, ok := p.intHint("value"); ok {
 		n.Value = int(min(max(v, 0), 100))
+		if int64(n.Value) != v {
+			p.addf("value hint %d is outside 0-100; drawn as %d", v, n.Value)
+		}
 	}
 	n.Timeout = timeoutFor(req.ExpireTimeout, n.Urgency, defaultTimeout)
-	return n
+	return n, p.problems
+}
+
+// parser reads one request's hints, collecting what is wrong with them.
+type parser struct {
+	h        map[string]any
+	problems []error
+}
+
+func (p *parser) addf(format string, args ...any) {
+	p.problems = append(p.problems, fmt.Errorf(format, args...))
 }
 
 // timeoutFor applies the specification's rules for expire_timeout:
@@ -220,18 +243,33 @@ func timeoutFor(ms int32, u Urgency, fallback time.Duration) time.Duration {
 	return fallback
 }
 
-// parseActions pairs up the flat [key, label, key, label, ...] list the
+// actions pairs up the flat [key, label, key, label, ...] list the
 // specification uses.
-func parseActions(raw []string) []Action {
+func (p *parser) actions(raw []string) []Action {
+	if len(raw)%2 != 0 {
+		p.addf("actions list has %d entries, not key/label pairs; %q is ignored", len(raw), raw[len(raw)-1])
+	}
 	if len(raw) < 2 {
 		return nil
 	}
 	out := make([]Action, 0, min(len(raw)/2, maxActions))
-	for i := 0; i+1 < len(raw) && len(out) < maxActions; i += 2 {
+	for i := 0; i+1 < len(raw); i += 2 {
+		if len(out) == maxActions {
+			p.addf("%d actions offered, only the first %d are kept", len(raw)/2, maxActions)
+			break
+		}
 		// The key is handed back verbatim in ActionInvoked, so it is never
 		// altered; an unusable one is dropped instead.
 		key := raw[i]
-		if key == "" || len(key) > maxKeyBytes || !utf8.ValidString(key) {
+		switch {
+		case key == "":
+			p.addf("action %d has an empty key; dropped", i/2)
+			continue
+		case len(key) > maxKeyBytes:
+			p.addf("action %d key is %d bytes, over the %d limit; dropped", i/2, len(key), maxKeyBytes)
+			continue
+		case !utf8.ValidString(key):
+			p.addf("action %d key %q is not UTF-8; dropped", i/2, key)
 			continue
 		}
 		out = append(out, Action{Key: key, Label: clip(singleLine(clean(raw[i+1])), maxLabelRunes)})
@@ -245,10 +283,15 @@ func parseActions(raw []string) []Action {
 // Senders often give it an empty value, meaning only "replace my previous
 // one", so the application's name stands in for the group then. The prefix
 // keeps the two kinds of key from ever colliding.
-func syncKey(h map[string]any, appName string) string {
+func (p *parser) syncKey(appName string) string {
 	for _, key := range [...]string{"x-canonical-private-synchronous", "synchronous", "private-synchronous"} {
-		v, ok := h[key].(string)
+		raw, present := p.h[key]
+		if !present {
+			continue
+		}
+		v, ok := raw.(string)
 		if !ok {
+			p.addf("hint %q is %T, want a string; ignored", key, raw)
 			continue
 		}
 		if v = clip(clean(v), maxNameRunes); v != "" {
@@ -259,33 +302,52 @@ func syncKey(h map[string]any, appName string) string {
 	return ""
 }
 
-// parseIcon collects the images a notification names, best first.
-func parseIcon(appIcon string, h map[string]any) Icon {
+// icon collects the images a notification names, best first.
+func (p *parser) icon(appIcon string) Icon {
 	var ic Icon
 	for _, key := range [...]string{"image-data", "image_data", "icon_data"} {
-		v, ok := h[key]
+		v, ok := p.h[key]
 		if !ok {
 			continue
 		}
-		if img, err := DecodeImageData(v); err == nil {
-			ic.Data = img
-			break
+		img, err := DecodeImageData(v)
+		if err != nil {
+			// The next spelling may still hold a usable image, and after
+			// that the named ones.
+			p.problems = append(p.problems, fmt.Errorf("hint %q: %w", key, err))
+			continue
 		}
+		ic.Data = img
+		break
 	}
-	for _, s := range [...]string{stringHint(h, "image-path"), stringHint(h, "image_path"), clean(appIcon)} {
-		ic.add(s)
+	for _, src := range [...]struct{ what, s string }{
+		{`hint "image-path"`, p.stringHint("image-path")},
+		{`hint "image_path"`, p.stringHint("image_path")},
+		{"app_icon", clean(appIcon)},
+	} {
+		if err := ic.add(src.s); err != nil {
+			p.problems = append(p.problems, fmt.Errorf("%s: %w", src.what, err))
+		}
 	}
 	return ic
 }
 
 // add files one image reference as a path or a theme name, keeping
-// whichever of each came first.
-func (ic *Icon) add(s string) {
+// whichever of each came first. A reference that is neither is an error,
+// and nothing is kept for it.
+func (ic *Icon) add(s string) error {
 	s = strings.TrimSpace(s)
 	switch {
 	case s == "":
 	case strings.HasPrefix(s, "file://"):
-		if u, err := url.Parse(s); err == nil && strings.HasPrefix(u.Path, "/") && ic.Path == "" {
+		u, err := url.Parse(s)
+		if err != nil {
+			return fmt.Errorf("image reference %q: %w", s, err)
+		}
+		if !strings.HasPrefix(u.Path, "/") {
+			return fmt.Errorf("image reference %q names no absolute path", s)
+		}
+		if ic.Path == "" {
 			ic.Path = filepath.Clean(u.Path)
 		}
 	case strings.HasPrefix(s, "/"):
@@ -295,31 +357,50 @@ func (ic *Icon) add(s string) {
 	case strings.ContainsAny(s, "/:"):
 		// A relative path or some other URI. Relative to what is anybody's
 		// guess, so neither is usable.
+		return fmt.Errorf("image reference %q is neither an absolute path, a file URI nor an icon name", s)
 	default:
 		if ic.Name == "" {
 			ic.Name = clip(s, maxNameRunes)
 		}
 	}
+	return nil
 }
 
-func stringHint(h map[string]any, key string) string {
-	s, ok := h[key].(string)
+func (p *parser) stringHint(key string) string {
+	raw, present := p.h[key]
+	if !present {
+		return ""
+	}
+	s, ok := raw.(string)
 	if !ok {
+		p.addf("hint %q is %T, want a string; ignored", key, raw)
 		return ""
 	}
 	return clean(s)
 }
 
-func boolHint(h map[string]any, key string) bool {
-	b, ok := h[key].(bool)
-	return ok && b
+func (p *parser) boolHint(key string) bool {
+	raw, present := p.h[key]
+	if !present {
+		return false
+	}
+	b, ok := raw.(bool)
+	if !ok {
+		p.addf("hint %q is %T, want a boolean; ignored", key, raw)
+		return false
+	}
+	return b
 }
 
 // intHint reads an integer hint of any width. The specification says
 // "urgency" is a byte, and most senders agree, but some send an int32 and
 // dropping their urgency over it would help nobody.
-func intHint(h map[string]any, key string) (int64, bool) {
-	switch v := h[key].(type) {
+func (p *parser) intHint(key string) (int64, bool) {
+	raw, present := p.h[key]
+	if !present {
+		return 0, false
+	}
+	switch v := raw.(type) {
 	case uint8:
 		return int64(v), true
 	case int16:
@@ -334,10 +415,12 @@ func intHint(h map[string]any, key string) (int64, bool) {
 		return v, true
 	case uint64:
 		if v > math.MaxInt64 {
+			p.addf("hint %q is %d, out of range; ignored", key, v)
 			return 0, false
 		}
 		return int64(v), true
 	}
+	p.addf("hint %q is %T, want an integer; ignored", key, raw)
 	return 0, false
 }
 

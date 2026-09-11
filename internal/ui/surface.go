@@ -12,6 +12,7 @@ package ui
 // which is what makes the window appear complete rather than filling in.
 
 import (
+	"errors"
 	"fmt"
 	"image"
 
@@ -150,13 +151,36 @@ func (s *surface) encode() {
 	}
 }
 
-func (s *surface) close() {
+// close frees the server-side resources. The requests are checked for the
+// reason ui.close gives.
+//
+// Both requests are sent before either is checked, so this costs one round
+// trip rather than two.
+func (s *surface) close() error {
+	var (
+		gcCookie     *xproto.FreeGCCookie
+		pixmapCookie *xproto.FreePixmapCookie
+	)
 	if s.gc != 0 {
-		xproto.FreeGC(s.conn, s.gc)
+		c := xproto.FreeGCChecked(s.conn, s.gc)
+		gcCookie = &c
 		s.gc = 0
 	}
 	if s.pixmap != 0 {
-		xproto.FreePixmap(s.conn, s.pixmap)
+		c := xproto.FreePixmapChecked(s.conn, s.pixmap)
+		pixmapCookie = &c
 		s.pixmap = 0
 	}
+	var errs []error
+	if gcCookie != nil {
+		if err := gcCookie.Check(); err != nil {
+			errs = append(errs, fmt.Errorf("freeing the graphics context: %w", err))
+		}
+	}
+	if pixmapCookie != nil {
+		if err := pixmapCookie.Check(); err != nil {
+			errs = append(errs, fmt.Errorf("freeing the pixmap: %w", err))
+		}
+	}
+	return errors.Join(errs...)
 }

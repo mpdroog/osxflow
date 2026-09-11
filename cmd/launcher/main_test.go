@@ -1,10 +1,37 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"testing"
 
 	"github.com/mpdroog/osxflow/internal/desktop"
+	"github.com/mpdroog/osxflow/internal/launch"
 )
+
+// The -windows table names the three expected reasons a window has no
+// executable, and shows anything else in full.
+func TestExeProblem(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{launch.ErrNoPID, "no pid"},
+		{fmt.Errorf("reading /proc/1/exe: %w", fs.ErrNotExist), "process has exited"},
+		{fmt.Errorf("reading /proc/1/exe: %w", fs.ErrPermission), "another user's process"},
+		{errors.New("reading /proc/1/exe: input/output error"), "reading /proc/1/exe: input/output error"},
+	}
+	for _, tc := range tests {
+		if got := exeProblem(tc.err); got != tc.want {
+			t.Errorf("exeProblem(%v) = %q, want %q", tc.err, got, tc.want)
+		}
+	}
+	// The real thing, for the case that needs no setup.
+	if _, err := launch.ProcExe(0); exeProblem(err) != "no pid" {
+		t.Errorf("exeProblem(ProcExe(0)) = %q", exeProblem(err))
+	}
+}
 
 func TestFindApp(t *testing.T) {
 	apps := []desktop.App{

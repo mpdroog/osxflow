@@ -49,14 +49,14 @@ func TestU32Clamps(t *testing.T) {
 // two's-complement word the server reads back as negative.
 func TestI32AsU32RoundTrips(t *testing.T) {
 	for _, in := range []int{0, 1, 1000, -1, -1000, 32767, -32768} {
-		got := int32(I32AsU32(in)) //nolint:gosec // reversing the documented reinterpretation
+		got := int32(I32AsU32(in))
 		if int(got) != in {
 			t.Errorf("I32AsU32(%d) came back as %d", in, got)
 		}
 	}
 	// Out of range still clamps rather than wrapping to a nonsense
 	// position on the far side of the screen.
-	if got := int32(I32AsU32(1 << 20)); got != 32767 { //nolint:gosec // as above
+	if got := int32(I32AsU32(1 << 20)); got != 32767 {
 		t.Errorf("I32AsU32(1<<20) = %d, want the clamped 32767", got)
 	}
 }

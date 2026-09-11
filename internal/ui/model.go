@@ -23,6 +23,10 @@ type Row struct {
 
 	Primary   string
 	Secondary string
+
+	// CalcError marks a calculator row whose Primary is why the query did
+	// not evaluate, rather than a result.
+	CalcError bool
 }
 
 // Model is the state behind the window.
@@ -38,6 +42,10 @@ type Model struct {
 	// calcText is the rendered calculator result, empty when the query is
 	// not an expression or does not evaluate.
 	calcText string
+
+	// calcErr is why an expression did not evaluate, nil when it did,
+	// when it is still being typed, or when it is not an expression.
+	calcErr error
 
 	// selected indexes rows(), so it counts the calculator row when there
 	// is one.
@@ -70,10 +78,18 @@ func (m *Model) Query() string { return m.query }
 // SetQuery replaces the text and resets the selection to the top, which is
 // what a changed query means: the old selection referred to a list that no
 // longer exists.
+//
+// "The top" skips a calculator error when an application follows it. The
+// error is there to be read, not chosen, and an app name that parses as a
+// broken sum must still launch on Enter.
 func (m *Model) SetQuery(q string) {
 	m.query = q
 	m.selected, m.offset = 0, 0
 	m.recompute()
+	if m.calcErr != nil && len(m.results) > 0 {
+		m.selected = 1
+		m.scrollToSelection()
+	}
 }
 
 // Insert appends typed text, ignoring control characters. Those arrive
@@ -150,6 +166,10 @@ func (m *Model) Selected() (*desktop.App, bool) {
 // CalcText is the calculator result for the current query, or "".
 func (m *Model) CalcText() string { return m.calcText }
 
+// CalcErr is why the current query, which looks like a sum, does not
+// evaluate -- "division by zero" -- or nil.
+func (m *Model) CalcErr() error { return m.calcErr }
+
 // Rows returns the visible slice of the list, and the index within it that
 // is selected (-1 when the selection is off screen, which should not
 // happen).
@@ -175,8 +195,11 @@ func (m *Model) rowCount() int { return len(m.allRows()) }
 // thing without them having to move the selection.
 func (m *Model) allRows() []Row {
 	rows := make([]Row, 0, len(m.results)+1)
-	if m.calcText != "" {
+	switch {
+	case m.calcText != "":
 		rows = append(rows, Row{Primary: m.calcText, Secondary: m.query})
+	case m.calcErr != nil:
+		rows = append(rows, Row{Primary: m.calcErr.Error(), Secondary: m.query, CalcError: true})
 	}
 	for i := range m.results {
 		app := m.results[i].App
@@ -197,30 +220,37 @@ func rowDetail(app *desktop.App) string {
 
 func (m *Model) recompute() {
 	m.results = search.Filter(m.apps, m.query, m.ranker)
-	m.calcText = evalQuery(m.query)
+	m.calcText, m.calcErr = evalQuery(m.query)
 	m.scrollToSelection()
 }
 
-// evalQuery renders the calculator line, or "" when there is nothing worth
-// showing.
+// evalQuery renders the calculator line. It returns "" and no error when
+// there is nothing worth showing, and "" and an error when the query is a
+// sum that cannot be worked out.
 //
 // An incomplete expression produces nothing rather than an error: the
 // query is being typed, and "12 *" is a state every multiplication passes
-// through. A wrong expression produces nothing either, because the
-// alternative is an error message shouting at someone halfway through
-// typing an application name that happens to start with a digit.
-func evalQuery(query string) string {
+// through. A wrong one -- "1/0", "sqrt(-1)" -- produces its error, which
+// the calculator row shows dimmed: that is the only way the user learns
+// the answer is "division by zero" rather than that the calculator broke.
+// Two things keep that from shouting at someone typing an application
+// name: LooksLikeExpr turns away anything that does not start like a sum,
+// and SetQuery leaves the selection on the first app below the error.
+//
+// The error is shown, not logged. It is the user's typing, not a fault,
+// and there is one per keystroke.
+func evalQuery(query string) (string, error) {
 	if !calc.LooksLikeExpr(query) {
-		return ""
+		return "", nil
 	}
 	v, err := calc.Eval(query)
 	if err != nil {
 		if errors.Is(err, calc.ErrIncomplete) {
-			return ""
+			return "", nil // still being typed
 		}
-		return ""
+		return "", err
 	}
-	return "= " + calc.Format(v)
+	return "= " + calc.Format(v), nil
 }
 
 // scrollToSelection moves the window over the list by the smallest amount

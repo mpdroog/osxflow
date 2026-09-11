@@ -254,11 +254,65 @@ func TestModelCalculatorIgnoresAppNames(t *testing.T) {
 	}
 }
 
-func TestModelCalculatorErrorsAreSilent(t *testing.T) {
+// A sum that cannot be worked out says why, in a dimmed calculator row:
+// that is how the user learns the answer is "division by zero" rather than
+// that the calculator broke.
+func TestModelCalculatorShowsErrors(t *testing.T) {
 	m := NewModel(testApps("Alpha"), 7, nil)
 	m.SetQuery("1/0")
 	if got := m.CalcText(); got != "" {
-		t.Errorf("CalcText = %q, want nothing for a bad expression", got)
+		t.Errorf("CalcText = %q, want no result for a bad expression", got)
+	}
+	if err := m.CalcErr(); err == nil || !strings.Contains(err.Error(), "division by zero") {
+		t.Fatalf("CalcErr = %v, want division by zero", err)
+	}
+	rows, sel := m.Rows()
+	if len(rows) == 0 || !rows[0].CalcError || !strings.Contains(rows[0].Primary, "division by zero") {
+		t.Fatalf("rows = %+v, want the error as the first row", rows)
+	}
+	if rows[0].App != nil || rows[0].Secondary != "1/0" {
+		t.Errorf("error row = %+v, want no app and the query underneath", rows[0])
+	}
+	if sel != 0 {
+		t.Errorf("selected %d, want the error row: nothing else is listed", sel)
+	}
+	// Enter on it does nothing, as on a result.
+	if _, ok := m.Selected(); ok {
+		t.Error("Selected returned an app for the error row")
+	}
+
+	// Fixing the sum replaces the error with the result.
+	m.SetQuery("1/2")
+	if m.CalcErr() != nil || m.CalcText() != "= 0.5" {
+		t.Errorf("after fixing: CalcText = %q, CalcErr = %v", m.CalcText(), m.CalcErr())
+	}
+	// Still being typed is not an error.
+	m.SetQuery("1/")
+	if m.CalcErr() != nil {
+		t.Errorf("CalcErr(\"1/\") = %v, want nil while incomplete", m.CalcErr())
+	}
+}
+
+// An error row must not take the selection from an application: an app
+// whose name happens to parse as a broken sum still launches on Enter.
+func TestModelCalculatorErrorDoesNotStealTheSelection(t *testing.T) {
+	m := NewModel(testApps("1/0 Tool", "Other"), 7, nil)
+	m.SetQuery("1/0")
+	if m.CalcErr() == nil {
+		t.Fatal("CalcErr = nil, want division by zero")
+	}
+	app, ok := m.Selected()
+	if !ok || app.Name != "1/0 Tool" {
+		t.Fatalf("Selected = %v, %v; want the app under the error row", app, ok)
+	}
+	rows, sel := m.Rows()
+	if sel != 1 || !rows[0].CalcError {
+		t.Errorf("selected %d of %+v, want row 1 under the error", sel, rows)
+	}
+	// The error row can still be reached, and choosing it still does nothing.
+	m.Move(-1)
+	if _, ok := m.Selected(); ok {
+		t.Error("Selected returned an app with the error row selected")
 	}
 }
 

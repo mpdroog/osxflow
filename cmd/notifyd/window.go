@@ -5,15 +5,17 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"image"
+	"log"
 	"math"
 
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xproto"
-	"github.com/jezek/xgbutil/ewmh"
 
 	"github.com/mpdroog/osxflow/internal/geom"
+	"github.com/mpdroog/osxflow/internal/xwin"
 )
 
 // argbVisual is a 32-bit TrueColor visual and the depth it belongs to.
@@ -40,9 +42,10 @@ func findARGB(screen *xproto.ScreenInfo) (argbVisual, bool) {
 }
 
 type atoms struct {
-	workarea     xproto.Atom
-	windowType   xproto.Atom
-	notification xproto.Atom
+	workarea       xproto.Atom
+	currentDesktop xproto.Atom
+	windowType     xproto.Atom
+	notification   xproto.Atom
 }
 
 // setupX interns the atoms, creates the colormap every banner shares, and
@@ -53,6 +56,7 @@ func (d *daemon) setupX() error {
 		name string
 	}{
 		{&d.atoms.workarea, "_NET_WORKAREA"},
+		{&d.atoms.currentDesktop, "_NET_CURRENT_DESKTOP"},
 		{&d.atoms.windowType, "_NET_WM_WINDOW_TYPE"},
 		{&d.atoms.notification, "_NET_WM_WINDOW_TYPE_NOTIFICATION"},
 	} {
@@ -75,13 +79,14 @@ func (d *daemon) setupX() error {
 	}
 	d.colormap = cmap
 
-	d.area = d.workArea()
+	d.updateWorkArea()
 	// The root window reports the work area changing -- a panel added,
 	// moved or resized -- so that banners follow it. Without that they
-	// stay where the panel used to end, which is survivable.
+	// stay where the panel used to end, which is survivable, and so worth
+	// a line rather than a failed start.
 	if watchErr := xproto.ChangeWindowAttributesChecked(d.conn, d.screen.Root,
 		xproto.CwEventMask, []uint32{uint32(xproto.EventMaskPropertyChange)}).Check(); watchErr != nil {
-		d.logf("warning: not watching the work area: %v", watchErr)
+		log.Printf("not watching the work area; banners will not follow panel changes: %v", watchErr)
 	}
 	return nil
 }
@@ -121,15 +126,34 @@ func (d *daemon) createWindow(x, y, w, h int) (xproto.Window, error) {
 	}
 
 	const name = "notifyd"
-	xproto.ChangeProperty(d.conn, xproto.PropModeReplace, win,
-		xproto.AtomWmName, xproto.AtomString, 8, geom.U32(len(name)), []byte(name))
 	class := []byte(name + "\x00Osxflow\x00")
-	xproto.ChangeProperty(d.conn, xproto.PropModeReplace, win,
-		xproto.AtomWmClass, xproto.AtomString, 8, geom.U32(len(class)), class)
 	typ := make([]byte, 4)
 	binary.LittleEndian.PutUint32(typ, uint32(d.atoms.notification))
-	xproto.ChangeProperty(d.conn, xproto.PropModeReplace, win,
-		d.atoms.windowType, xproto.AtomAtom, 32, 1, typ)
+	// All three go out before any is checked, so the checks cost one round
+	// trip rather than three.
+	cookies := [...]struct {
+		name   string
+		cookie xproto.ChangePropertyCookie
+	}{
+		{"WM_NAME", xproto.ChangePropertyChecked(d.conn, xproto.PropModeReplace, win,
+			xproto.AtomWmName, xproto.AtomString, 8, geom.U32(len(name)), []byte(name))},
+		{"WM_CLASS", xproto.ChangePropertyChecked(d.conn, xproto.PropModeReplace, win,
+			xproto.AtomWmClass, xproto.AtomString, 8, geom.U32(len(class)), class)},
+		{"_NET_WM_WINDOW_TYPE", xproto.ChangePropertyChecked(d.conn, xproto.PropModeReplace, win,
+			d.atoms.windowType, xproto.AtomAtom, 32, 1, typ)},
+	}
+	var errs []error
+	for _, c := range cookies {
+		if err := c.cookie.Check(); err != nil {
+			errs = append(errs, fmt.Errorf("setting %s on a banner window: %w", c.name, err))
+		}
+	}
+	if len(errs) > 0 {
+		if destroyErr := xproto.DestroyWindowChecked(d.conn, win).Check(); destroyErr != nil {
+			errs = append(errs, fmt.Errorf("destroying the half-made window: %w", destroyErr))
+		}
+		return 0, errors.Join(errs...)
+	}
 	return win, nil
 }
 
@@ -141,6 +165,9 @@ func atom(conn *xgb.Conn, name string) (xproto.Atom, error) {
 	return reply.Atom, nil
 }
 
+// raise and moveWindow are unchecked: they are sent per frame or per
+// event, and a check would be a round trip each. A failure arrives as an X
+// error in the event loop, which logs it.
 func (d *daemon) raise(win xproto.Window) {
 	xproto.ConfigureWindow(d.conn, win, xproto.ConfigWindowStackMode, []uint32{xproto.StackModeAbove})
 }
@@ -150,32 +177,95 @@ func (d *daemon) moveWindow(win xproto.Window, x, y int) {
 		[]uint32{geom.I32AsU32(x), geom.I32AsU32(y)})
 }
 
-func (d *daemon) resizeWindow(win xproto.Window, w, h int) {
-	xproto.ConfigureWindow(d.conn, win, xproto.ConfigWindowWidth|xproto.ConfigWindowHeight,
-		[]uint32{geom.U32(w), geom.U32(h)})
+// resizeWindow is checked, unlike moving: it happens once per replaced
+// notification, and the surface made for the new size next is only right
+// if the window really has that size.
+func (d *daemon) resizeWindow(win xproto.Window, w, h int) error {
+	if err := xproto.ConfigureWindowChecked(d.conn, win, xproto.ConfigWindowWidth|xproto.ConfigWindowHeight,
+		[]uint32{geom.U32(w), geom.U32(h)}).Check(); err != nil {
+		return fmt.Errorf("resizing window to %dx%d: %w", w, h, err)
+	}
+	return nil
+}
+
+// updateWorkArea rereads the work area, at startup and whenever the root
+// window says it changed.
+func (d *daemon) updateWorkArea() {
+	area, err := d.workArea()
+	if err != nil {
+		log.Printf("work area: %v; using %v", err, area)
+	}
+	d.area = area
 }
 
 // workArea is the screen minus what panels reserve, for the current
 // desktop; the whole screen when the window manager does not say.
-func (d *daemon) workArea() image.Rectangle {
+//
+// The rectangle is always usable. The error says why it may not be the
+// right one: a property that could not be read, or one that makes no
+// sense.
+func (d *daemon) workArea() (image.Rectangle, error) {
 	full := image.Rect(0, 0, int(d.screen.WidthInPixels), int(d.screen.HeightInPixels))
-	areas, err := ewmh.WorkareaGet(d.X)
-	if err != nil || len(areas) == 0 {
-		return full
+	reply, err := xwin.GetProperty(d.conn, d.screen.Root, d.atoms.workarea, "_NET_WORKAREA")
+	switch {
+	case errors.Is(err, xwin.ErrPropUnset):
+		// No window manager, or one that reserves nothing for panels.
+		return full, nil
+	case err != nil:
+		return full, err
 	}
-	i := 0
-	if cur, curErr := ewmh.CurrentDesktopGet(d.X); curErr == nil && cur < uint(len(areas)) {
-		i = toInt(cur)
+	vals, err := xwin.DecodeCard32s(reply)
+	if err != nil {
+		return full, fmt.Errorf("_NET_WORKAREA: %w", err)
 	}
-	a := areas[i]
-	r := image.Rect(a.X, a.Y, a.X+toInt(a.Width), a.Y+toInt(a.Height)).Intersect(full)
-	if r.Empty() {
-		return full
+
+	var desktop uint32
+	var desktopErr error
+	cur, err := xwin.GetProperty(d.conn, d.screen.Root, d.atoms.currentDesktop, "_NET_CURRENT_DESKTOP")
+	switch {
+	case errors.Is(err, xwin.ErrPropUnset):
+		// A window manager without desktops: there is only the first.
+	case err != nil:
+		desktopErr = fmt.Errorf("%w; using the first desktop's area", err)
+	default:
+		if desktop, err = xwin.DecodeCard32(cur); err != nil {
+			desktopErr = fmt.Errorf("_NET_CURRENT_DESKTOP: %w; using the first desktop's area", err)
+		}
 	}
-	return r
+	r, areaErr := workAreaFrom(full, vals, desktop)
+	return r, errors.Join(desktopErr, areaErr)
 }
 
-func toInt(u uint) int {
+// workAreaFrom picks one desktop's area out of _NET_WORKAREA's values --
+// x, y, width and height for each desktop in turn -- and keeps it on the
+// screen. Whatever does not add up is reported and worked around: a
+// desktop beyond the list gets the first desktop's area, and an area off
+// the screen gets the whole screen.
+func workAreaFrom(full image.Rectangle, vals []uint32, desktop uint32) (image.Rectangle, error) {
+	n := len(vals) / 4
+	if n == 0 {
+		return full, fmt.Errorf("_NET_WORKAREA has %d values, want four per desktop", len(vals))
+	}
+	var errs []error
+	if len(vals)%4 != 0 {
+		errs = append(errs, fmt.Errorf("_NET_WORKAREA has %d values, not four per desktop; the extra are ignored", len(vals)))
+	}
+	if uint64(desktop) >= uint64(n) {
+		errs = append(errs, fmt.Errorf("current desktop is %d, but _NET_WORKAREA covers %d; using the first", desktop, n))
+		desktop = 0
+	}
+	a := vals[4*desktop : 4*desktop+4]
+	x, y := toInt(a[0]), toInt(a[1])
+	r := image.Rect(x, y, x+toInt(a[2]), y+toInt(a[3])).Intersect(full)
+	if r.Empty() {
+		errs = append(errs, fmt.Errorf("_NET_WORKAREA for desktop %d is %v, which misses the %v screen",
+			desktop, a, full.Size()))
+		return full, errors.Join(errs...)
+	}
+	return r, errors.Join(errs...)
+}
+
+func toInt(u uint32) int {
 	if u > math.MaxInt32 {
 		return math.MaxInt32
 	}
@@ -191,12 +281,18 @@ func toInt(u uint) int {
 // that actually overlap count. The requests for all of them go out before
 // any reply is read, which makes this one round trip rather than one per
 // window.
-func (d *daemon) coveredByOther(b *banner) bool {
+//
+// It answers false when the tree cannot be read. A window it could not
+// inspect is left out and reported in the error, unless it had simply been
+// destroyed since the tree was read, which happens all the time and is no
+// fault.
+func (d *daemon) coveredByOther(b *banner) (bool, error) {
 	tree, err := xproto.QueryTree(d.conn, d.screen.Root).Reply()
 	if err != nil {
-		return false
+		return false, fmt.Errorf("listing windows: %w", err)
 	}
 	var (
+		wins  []xproto.Window
 		attrs []xproto.GetWindowAttributesCookie
 		geoms []xproto.GetGeometryCookie
 		above bool
@@ -209,18 +305,35 @@ func (d *daemon) coveredByOther(b *banner) bool {
 		if !above || d.byWin[w] != nil {
 			continue
 		}
+		wins = append(wins, w)
 		attrs = append(attrs, xproto.GetWindowAttributes(d.conn, w))
 		geoms = append(geoms, xproto.GetGeometry(d.conn, xproto.Drawable(w)))
 	}
 
 	mine := image.Rect(b.curX, b.curY, b.curX+b.lay.size.X, b.curY+b.lay.size.Y)
 	covered := false
+	var errs []error
 	for i := range attrs {
 		// Every reply is read, even after the answer is known, or it would
 		// sit in xgb's queue for good.
 		a, attrErr := attrs[i].Reply()
 		g, geomErr := geoms[i].Reply()
-		if attrErr != nil || geomErr != nil || a.MapState != xproto.MapStateViewable {
+		usable := true
+		for _, err := range [...]error{attrErr, geomErr} {
+			switch {
+			case err == nil:
+			case destroyed(err):
+				usable = false
+			default:
+				usable = false
+				errs = append(errs, fmt.Errorf("inspecting window 0x%x: %w", wins[i], err))
+			}
+		}
+		if usable && (a == nil || g == nil) {
+			usable = false
+			errs = append(errs, fmt.Errorf("inspecting window 0x%x: no reply from the X server", wins[i]))
+		}
+		if !usable || a.MapState != xproto.MapStateViewable {
 			continue
 		}
 		border := 2 * int(g.BorderWidth)
@@ -229,5 +342,13 @@ func (d *daemon) coveredByOther(b *banner) bool {
 			covered = true
 		}
 	}
-	return covered
+	return covered, errors.Join(errs...)
+}
+
+// destroyed reports whether an X error means only that the window it was
+// about no longer exists.
+func destroyed(err error) bool {
+	var window xproto.WindowError
+	var drawable xproto.DrawableError
+	return errors.As(err, &window) || errors.As(err, &drawable)
 }

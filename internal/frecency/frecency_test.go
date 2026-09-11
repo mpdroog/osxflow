@@ -1,9 +1,11 @@
 package frecency
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -293,6 +295,96 @@ func TestLoadCorruptFileReturnsAUsableStore(t *testing.T) {
 	s.Record("q", "app", t0)
 	if s.Score("app", t0) != 1 {
 		t.Error("the store from a corrupt file does not work")
+	}
+}
+
+// The corrupt file must survive the next Save: it is moved aside, and the
+// error says where to.
+func TestLoadMovesACorruptFileAside(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "frecency.json")
+	corrupt := []byte(`{"apps": {"firefox.desktop": {"uses": 4`)
+	if err := os.WriteFile(path, corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load(path)
+	if err == nil {
+		t.Fatal("Load reported no error for a corrupt file")
+	}
+	aside := path + ".corrupt"
+	if !strings.Contains(err.Error(), aside) {
+		t.Errorf("error = %q, want it to say the file went to %s", err, aside)
+	}
+	if got, readErr := os.ReadFile(aside); readErr != nil || !bytes.Equal(got, corrupt) {
+		t.Errorf("%s = %q, %v; want the corrupt contents kept", aside, got, readErr)
+	}
+
+	s.Record("q", "app", t0)
+	if err := s.Save(t0); err != nil {
+		t.Fatalf("Save after a corrupt Load: %v", err)
+	}
+	if got, readErr := os.ReadFile(aside); readErr != nil || !bytes.Equal(got, corrupt) {
+		t.Errorf("after Save, %s = %q, %v; want it untouched", aside, got, readErr)
+	}
+}
+
+// If the corrupt file cannot be moved, it must not be overwritten either:
+// the store that comes back refuses to Save.
+func TestLoadDoesNotOverwriteACorruptFileItCannotMove(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can rename in a read-only directory")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "frecency.json")
+	corrupt := []byte("{not json")
+	if err := os.WriteFile(path, corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
+
+	s, err := Load(path)
+	if err == nil {
+		t.Fatal("Load reported no error")
+	}
+	if !strings.Contains(err.Error(), "will not be saved") {
+		t.Errorf("error = %q, want it to say usage will not be saved", err)
+	}
+	s.Record("q", "app", t0)
+	if err := s.Save(t0); err == nil {
+		t.Error("Save succeeded, want it to refuse rather than overwrite the corrupt file")
+	}
+	if got, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(got, corrupt) {
+		t.Errorf("%s = %q, %v; want it untouched", path, got, readErr)
+	}
+}
+
+// A Save that fails must report it and leave no temporary file behind.
+func TestSaveFailureRemovesTheTemporaryFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "frecency.json")
+	// A directory where the file should be: the final rename fails.
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := New(path)
+	s.Record("q", "app", t0)
+	if err := s.Save(t0); err == nil {
+		t.Fatal("Save over a directory succeeded")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "frecency.json" {
+			t.Errorf("left %s behind", e.Name())
+		}
 	}
 }
 

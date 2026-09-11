@@ -1,6 +1,8 @@
 package desktop
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -80,9 +82,12 @@ Comment=Does things
 Name=Open a New Window
 Exec=realapp --new-window
 `
-	e, err := parse(strings.NewReader(src))
+	e, problems, err := parse(strings.NewReader(src))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
+	}
+	if len(problems) != 0 {
+		t.Errorf("problems = %v, want none: comments, blanks and other groups are not malformed", problems)
 	}
 	if got := e["Name"]; got != "Real Name" {
 		t.Errorf("Name = %q, want %q", got, "Real Name")
@@ -96,7 +101,7 @@ Exec=realapp --new-window
 }
 
 func TestParseDuplicateKeyFirstWins(t *testing.T) {
-	e, err := parse(strings.NewReader("[Desktop Entry]\nName=First\nName=Second\n"))
+	e, _, err := parse(strings.NewReader("[Desktop Entry]\nName=First\nName=Second\n"))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -106,7 +111,7 @@ func TestParseDuplicateKeyFirstWins(t *testing.T) {
 }
 
 func TestParseIgnoresContentBeforeGroup(t *testing.T) {
-	e, err := parse(strings.NewReader("Stray=value\n[Desktop Entry]\nName=X\n"))
+	e, _, err := parse(strings.NewReader("Stray=value\n[Desktop Entry]\nName=X\n"))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -115,6 +120,103 @@ func TestParseIgnoresContentBeforeGroup(t *testing.T) {
 	}
 	if e["Name"] != "X" {
 		t.Errorf("Name = %q, want X", e["Name"])
+	}
+}
+
+// A line with no '=' is skipped -- the rest of the entry still counts --
+// and reported with its line number.
+func TestParseReportsMalformedLines(t *testing.T) {
+	src := "[Desktop Entry]\nName=X\nthis line is junk\nExec=x\n[Desktop Action a]\nalso junk, but not ours\n"
+	e, problems, err := parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if e["Exec"] != "x" {
+		t.Errorf("Exec = %q, want the line after the junk still read", e["Exec"])
+	}
+	if len(problems) != 1 {
+		t.Fatalf("problems = %v, want exactly the one junk line in [Desktop Entry]", problems)
+	}
+	if msg := problems[0].Error(); !strings.Contains(msg, "line 3") || !strings.Contains(msg, "this line is junk") {
+		t.Errorf("problem = %q, want it to give the line number and the line", msg)
+	}
+}
+
+func TestLoadNamesTheFileInProblems(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.desktop")
+	write(t, path, "[Desktop Entry]\nType=Application\nName=X\nExec=/bin/sh\njunk\n")
+	app, ok, problems, err := Load(path, "x.desktop")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !ok || app.Name != "X" {
+		t.Errorf("Load = %+v ok=%v, want the entry despite the bad line", app, ok)
+	}
+	if len(problems) != 1 || !strings.Contains(problems[0].Error(), path) {
+		t.Errorf("problems = %v, want one naming %s", problems, path)
+	}
+}
+
+func TestLoadMissingFileIsAnError(t *testing.T) {
+	_, ok, _, err := Load(filepath.Join(t.TempDir(), "gone.desktop"), "gone.desktop")
+	if !errors.Is(err, fs.ErrNotExist) || ok {
+		t.Errorf("Load of a missing file: ok=%v err=%v, want fs.ErrNotExist", ok, err)
+	}
+}
+
+// notExecutable makes a file that exists but cannot be run.
+func notExecutable(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "not-executable")
+	write(t, path, "#!/bin/sh\n")
+	return path
+}
+
+func TestFindBinary(t *testing.T) {
+	// Not installed is an answer, not a failure.
+	for _, cmd := range []string{"", "definitely-not-installed-anywhere", "/nonexistent/binary"} {
+		if got, err := findBinary(cmd); got != "" || err != nil {
+			t.Errorf("findBinary(%q) = %q, %v; want \"\", nil", cmd, got, err)
+		}
+	}
+	if got, err := findBinary("sh"); got == "" || err != nil {
+		t.Errorf("findBinary(sh) = %q, %v; want a path", got, err)
+	}
+	// There but not runnable is a fault on this system, and says so.
+	path := notExecutable(t)
+	if got, err := findBinary(path); got != "" || !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("findBinary(%s) = %q, %v; want a permission error", path, got, err)
+	}
+}
+
+// A TryExec that cannot be checked hides the entry, as a missing one does,
+// but reports why.
+func TestToAppTryExecThatCannotRunIsHiddenAndReported(t *testing.T) {
+	path := notExecutable(t)
+	e := entry{"Type": "Application", "Name": "T", "Exec": "/bin/sh", "TryExec": path}
+	_, ok, problems := e.toApp("t.desktop")
+	if ok {
+		t.Error("entry is visible, want it hidden")
+	}
+	if len(problems) != 1 || !strings.Contains(problems[0].Error(), "TryExec") {
+		t.Errorf("problems = %v, want one about TryExec", problems)
+	}
+}
+
+// An Exec binary that cannot be resolved costs matching by executable, not
+// the entry: it is still listed, and the problem is reported.
+func TestToAppUnresolvableBinaryIsReportedNotHidden(t *testing.T) {
+	path := notExecutable(t)
+	e := entry{"Type": "Application", "Name": "T", "Exec": path}
+	app, ok, problems := e.toApp("t.desktop")
+	if !ok {
+		t.Fatal("entry is hidden, want it listed")
+	}
+	if app.Binary != "" {
+		t.Errorf("Binary = %q, want empty", app.Binary)
+	}
+	if len(problems) != 1 || !errors.Is(problems[0], fs.ErrPermission) {
+		t.Errorf("problems = %v, want the permission error", problems)
 	}
 }
 
@@ -139,13 +241,17 @@ func TestToAppVisibility(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			e, err := parse(strings.NewReader(tc.src))
+			e, _, err := parse(strings.NewReader(tc.src))
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
-			_, ok := e.toApp("t.desktop")
+			_, ok, problems := e.toApp("t.desktop")
 			if ok != tc.want {
 				t.Errorf("toApp visible = %v, want %v", ok, tc.want)
+			}
+			// Hidden and not installed are answers, not problems.
+			if len(problems) != 0 {
+				t.Errorf("problems = %v, want none", problems)
 			}
 		})
 	}
@@ -154,13 +260,16 @@ func TestToAppVisibility(t *testing.T) {
 func TestToAppFields(t *testing.T) {
 	src := "[Desktop Entry]\nType=Application\nName=My App\nComment=Nice\n" +
 		"Exec=/bin/sh -c true %U\nIcon=myicon\nStartupWMClass=MyApp\nTerminal=true\n"
-	e, err := parse(strings.NewReader(src))
+	e, _, err := parse(strings.NewReader(src))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	app, ok := e.toApp("my.desktop")
+	app, ok, problems := e.toApp("my.desktop")
 	if !ok {
 		t.Fatal("toApp said not visible, want visible")
+	}
+	if len(problems) != 0 {
+		t.Errorf("problems = %v, want none", problems)
 	}
 	if app.Name != "My App" || app.Comment != "Nice" || app.Icon != "myicon" {
 		t.Errorf("fields wrong: %+v", app)
@@ -262,14 +371,85 @@ func TestDataDirsDefaults(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", "/custom/data")
 	t.Setenv("XDG_DATA_DIRS", "/a:/b")
 	want := []string{"/custom/data/applications", "/a/applications", "/b/applications"}
-	if got := DataDirs(); !reflect.DeepEqual(got, want) {
-		t.Errorf("DataDirs() = %v, want %v", got, want)
+	if got, err := DataDirs(); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("DataDirs() = %v, %v; want %v", got, err, want)
 	}
 
 	t.Setenv("XDG_DATA_DIRS", "")
-	got := DataDirs()
-	if len(got) != 3 || got[1] != "/usr/local/share/applications" || got[2] != "/usr/share/applications" {
-		t.Errorf("DataDirs() with empty XDG_DATA_DIRS = %v, want the spec defaults", got)
+	got, err := DataDirs()
+	if err != nil || len(got) != 3 || got[1] != "/usr/local/share/applications" || got[2] != "/usr/share/applications" {
+		t.Errorf("DataDirs() with empty XDG_DATA_DIRS = %v, %v; want the spec defaults", got, err)
+	}
+}
+
+// With no way to find the user's directory the system ones are still
+// returned, and the missing one is an error rather than a silent gap.
+func TestDataDirsWithoutHome(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_DATA_DIRS", "/a")
+	got, err := DataDirs()
+	if err == nil {
+		t.Error("DataDirs() reported nothing with $HOME unset")
+	}
+	if want := []string{"/a/applications"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("DataDirs() = %v, want %v", got, want)
+	}
+}
+
+func TestScanReportsAMissingHome(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_DATA_DIRS", t.TempDir()) // no applications directory: silent
+	_, problems := Scan()
+	if len(problems) != 1 || !strings.Contains(problems[0].Error(), "user's own applications") {
+		t.Errorf("problems = %v, want the one about $HOME", problems)
+	}
+}
+
+// Only a missing top-level directory is normal. Trouble inside one that
+// exists -- an unreadable subdirectory, an entry that points nowhere -- is
+// reported.
+func TestScanDirsReportsTroubleBelowTheRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read a mode-000 directory")
+	}
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "good.desktop"),
+		"[Desktop Entry]\nType=Application\nName=Good\nExec=/bin/sh\n")
+	locked := filepath.Join(dir, "locked")
+	write(t, filepath.Join(locked, "hidden.desktop"),
+		"[Desktop Entry]\nType=Application\nName=Hidden\nExec=/bin/sh\n")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(locked, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := os.Symlink(filepath.Join(dir, "nowhere"), filepath.Join(dir, "dangling.desktop")); err != nil {
+		t.Fatal(err)
+	}
+
+	apps, problems := ScanDirs([]string{dir})
+	if len(apps) != 1 || apps[0].Name != "Good" {
+		t.Errorf("apps = %v, want just Good", ids(apps))
+	}
+	var sawLocked, sawDangling bool
+	for _, p := range problems {
+		sawLocked = sawLocked || errors.Is(p, fs.ErrPermission)
+		sawDangling = sawDangling || (errors.Is(p, fs.ErrNotExist) && strings.Contains(p.Error(), "dangling.desktop"))
+	}
+	if !sawLocked || !sawDangling {
+		t.Errorf("problems = %v, want the unreadable directory and the dangling entry", problems)
+	}
+}
+
+func TestDesktopID(t *testing.T) {
+	id, depth, err := desktopID("/usr/share/applications", "/usr/share/applications/kde/konsole.desktop")
+	if err != nil || id != "kde-konsole.desktop" || depth != 1 {
+		t.Errorf("desktopID = %q, %d, %v; want kde-konsole.desktop, 1, nil", id, depth, err)
 	}
 }
 

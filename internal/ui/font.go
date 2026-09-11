@@ -2,31 +2,19 @@ package ui
 
 // Font loading, without fontconfig.
 //
-// Asking fontconfig for a font would mean cgo, so the candidates below are
-// hardcoded paths instead. That is less general than it looks: the list
-// only has to contain one font that exists, the paths are stable across
-// Debian and Arch derivatives, and a launcher needs exactly one typeface.
-// Ubuntu is first because it is what XFCE's own Gtk/FontName setting names
-// on the machine this was built for, so the launcher matches the desktop
-// around it.
+// Finding and parsing the typeface is internal/text's job, shared with the
+// other tools so there is one candidate list and one set of rules about
+// what counts as a font that failed to load. This file only opens the
+// sizes the launcher draws at.
 
 import (
+	"errors"
 	"fmt"
-	"os"
 
 	"golang.org/x/image/font"
-	"golang.org/x/image/font/opentype"
-	"golang.org/x/image/font/sfnt"
-)
 
-var fontCandidates = []string{
-	"/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
-	"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-	"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-	"/usr/share/fonts/TTF/DejaVuSans.ttf",
-	"/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-	"/usr/share/fonts/noto/NotoSans-Regular.ttf",
-}
+	"github.com/mpdroog/osxflow/internal/text"
+)
 
 // faces holds the sizes the interface draws at, all from one typeface.
 type faces struct {
@@ -35,22 +23,24 @@ type faces struct {
 	detail font.Face // the second line of a row
 }
 
-func (f *faces) close() {
+// close frees the faces' glyph caches. Nothing depends on it having
+// worked, so the caller reports a failure rather than acting on it.
+func (f *faces) close() error {
+	var errs []error
 	for _, face := range []font.Face{f.query, f.name, f.detail} {
 		if face == nil {
 			continue
 		}
-		// Closing a face frees a cache; there is nothing to do about a
-		// failure and nothing that depends on it having worked.
 		if err := face.Close(); err != nil {
-			_ = err
+			errs = append(errs, fmt.Errorf("closing a font face: %w", err))
 		}
 	}
+	return errors.Join(errs...)
 }
 
 // loadFaces finds a usable font and opens the three sizes.
 func loadFaces(m *metrics) (*faces, error) {
-	parsed, path, err := loadFont(fontCandidates)
+	parsed, path, err := text.Load(text.Candidates)
 	if err != nil {
 		return nil, err
 	}
@@ -64,42 +54,14 @@ func loadFaces(m *metrics) (*faces, error) {
 		{&out.name, m.nameFontSize},
 		{&out.detail, m.detailFontSize},
 	} {
-		face, err := opentype.NewFace(parsed, &opentype.FaceOptions{
-			Size: spec.size,
-			DPI:  fontDPI,
-			// Full hinting keeps small text sharp at these sizes, which is
-			// the difference between a list that reads instantly and one
-			// that looks blurry.
-			Hinting: font.HintingFull,
-		})
+		// text.Face hints fully, which keeps small text sharp at these
+		// sizes: the difference between a list that reads instantly and
+		// one that looks blurry.
+		face, err := text.Face(parsed, spec.size)
 		if err != nil {
-			out.close()
-			return nil, fmt.Errorf("opening %s at %gpt: %w", path, spec.size, err)
+			return nil, errors.Join(fmt.Errorf("%s: %w", path, err), out.close())
 		}
 		*spec.dst = face
 	}
 	return out, nil
-}
-
-// loadFont returns the first candidate that exists and parses, naming
-// every path it tried when none does -- a launcher that will not start
-// should say what it was looking for.
-func loadFont(candidates []string) (*sfnt.Font, string, error) {
-	var lastErr error
-	for _, path := range candidates {
-		data, err := os.ReadFile(path) //nolint:gosec // paths are a fixed list in this file
-		if err != nil {
-			continue
-		}
-		parsed, err := opentype.Parse(data)
-		if err != nil {
-			lastErr = fmt.Errorf("parsing %s: %w", path, err)
-			continue
-		}
-		return parsed, path, nil
-	}
-	if lastErr != nil {
-		return nil, "", lastErr
-	}
-	return nil, "", fmt.Errorf("no usable font found; tried %v", candidates)
 }

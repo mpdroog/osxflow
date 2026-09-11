@@ -1,13 +1,16 @@
 package ui
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/jezek/xgb/xproto"
 	"golang.org/x/image/font"
-	"golang.org/x/image/font/opentype"
+
+	"github.com/mpdroog/osxflow/internal/scale"
+	"github.com/mpdroog/osxflow/internal/text"
 )
 
 func TestNewMetricsScales(t *testing.T) {
@@ -94,46 +97,58 @@ func TestScaleFromXfconfFile(t *testing.T) {
     <property name="WindowScalingFactor" type="int" value="2"/>
   </property>
 </channel>`)
-	if got, ok := scaleFromXfconfFile(good); !ok || got != 2 {
-		t.Errorf("scale = %g ok=%v, want 2 true", got, ok)
+	if got, err := scaleFromXfconfFile(good); err != nil || got != 2 {
+		t.Errorf("scale = %g err=%v, want 2 nil", got, err)
 	}
 
 	// The same file as it looks with scaling off.
 	off := filepath.Join(dir, "off.xml")
 	writeFile(t, off, `<channel name="xsettings"><property name="Gdk" type="empty">
 	<property name="WindowScalingFactor" type="int" value="1"/></property></channel>`)
-	if got, ok := scaleFromXfconfFile(off); !ok || got != 1 {
-		t.Errorf("scale = %g ok=%v, want 1 true", got, ok)
+	if got, err := scaleFromXfconfFile(off); err != nil || got != 1 {
+		t.Errorf("scale = %g err=%v, want 1 nil", got, err)
 	}
 
-	// Absent, malformed, and wrong-typed files must all decline rather
-	// than guess.
-	for name, content := range map[string]string{
-		"missing.xml": "",
-		"broken.xml":  "<channel><not closed",
-		"empty.xml":   `<channel name="xsettings"></channel>`,
-		"wrongtype":   `<channel><property name="Gdk"><property name="WindowScalingFactor" type="string" value="2"/></property></channel>`,
-		"zero.xml":    `<channel><property name="Gdk"><property name="WindowScalingFactor" type="int" value="0"/></property></channel>`,
+	// Absent files and absent keys decline quietly; malformed and
+	// wrong-typed ones decline with an error. None of them guess.
+	for name, tc := range map[string]struct {
+		content string
+		unset   bool
+	}{
+		"missing.xml": {"", true},
+		"empty.xml":   {`<channel name="xsettings"></channel>`, true},
+		"broken.xml":  {"<channel><not closed", false},
+		"wrongtype":   {`<channel><property name="Gdk"><property name="WindowScalingFactor" type="string" value="2"/></property></channel>`, false},
+		"zero.xml":    {`<channel><property name="Gdk"><property name="WindowScalingFactor" type="int" value="0"/></property></channel>`, false},
 	} {
 		path := filepath.Join(dir, name)
-		if content != "" {
-			writeFile(t, path, content)
+		if tc.content != "" {
+			writeFile(t, path, tc.content)
 		}
-		if _, ok := scaleFromXfconfFile(path); ok {
-			t.Errorf("%s: reported a scale, want none", name)
+		got, err := scaleFromXfconfFile(path)
+		if err == nil {
+			t.Errorf("%s: reported a scale of %g, want none", name, got)
+			continue
+		}
+		if errors.Is(err, scale.ErrUnset) != tc.unset {
+			t.Errorf("%s: error = %v, want unset=%v", name, err, tc.unset)
 		}
 	}
 }
 
 func TestScaleFromEnv(t *testing.T) {
 	t.Setenv("GDK_SCALE", "2")
-	if got, ok := scaleFromEnv(); !ok || got != 2 {
-		t.Errorf("scaleFromEnv = %g ok=%v, want 2 true", got, ok)
+	if got, err := scaleFromEnv(); err != nil || got != 2 {
+		t.Errorf("scaleFromEnv = %g err=%v, want 2 nil", got, err)
 	}
-	for _, bad := range []string{"", "0", "-1", "two"} {
+	t.Setenv("GDK_SCALE", "")
+	if _, err := scaleFromEnv(); !errors.Is(err, scale.ErrUnset) {
+		t.Errorf("GDK_SCALE=\"\": error = %v, want ErrUnset", err)
+	}
+	for _, bad := range []string{"0", "-1", "two", "NaN", "Inf"} {
 		t.Setenv("GDK_SCALE", bad)
-		if _, ok := scaleFromEnv(); ok {
-			t.Errorf("GDK_SCALE=%q was accepted", bad)
+		if got, err := scaleFromEnv(); err == nil || errors.Is(err, scale.ErrUnset) {
+			t.Errorf("GDK_SCALE=%q: got %g, %v; want it rejected with an error", bad, got, err)
 		}
 	}
 }
@@ -142,16 +157,21 @@ func TestScaleFromEnv(t *testing.T) {
 // the -scale flag.
 func TestDetectScaleOverrideWins(t *testing.T) {
 	t.Setenv("GDK_SCALE", "3")
-	if got := DetectScale(nil, 1.25); got != 1.25 {
-		t.Errorf("DetectScale = %g, want the 1.25 override", got)
+	if got, err := DetectScale(nil, 1.25); err != nil || got != 1.25 {
+		t.Errorf("DetectScale = %g, %v; want the 1.25 override", got, err)
 	}
 }
 
 func TestDetectScaleFallsBackToOne(t *testing.T) {
 	t.Setenv("GDK_SCALE", "")
 	t.Setenv("HOME", t.TempDir()) // no xfconf file there
-	if got := DetectScale(nil, 0); got != 1 {
+	got, err := DetectScale(nil, 0)
+	if got != 1 {
 		t.Errorf("DetectScale = %g, want 1 with nothing to go on", got)
+	}
+	// An unscaled desktop is not a fault, so nothing to log.
+	if err != nil {
+		t.Errorf("DetectScale error = %v, want none when nothing is configured", err)
 	}
 }
 
@@ -243,30 +263,20 @@ func TestTruncate(t *testing.T) {
 
 func testFace(t *testing.T) font.Face {
 	t.Helper()
-	parsed, _, err := loadFont(fontCandidates)
+	parsed, _, err := text.Load(text.Candidates)
 	if err != nil {
 		t.Skipf("no system font available: %v", err)
 	}
-	face, err := opentype.NewFace(parsed, &opentype.FaceOptions{Size: 12, DPI: fontDPI})
+	face, err := text.Face(parsed, 12)
 	if err != nil {
 		t.Fatalf("opening a face: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := face.Close(); err != nil {
-			t.Logf("closing the face: %v", err)
+			t.Errorf("closing the face: %v", err)
 		}
 	})
 	return face
-}
-
-func TestLoadFontReportsWhatItTried(t *testing.T) {
-	_, _, err := loadFont([]string{"/nonexistent/a.ttf", "/nonexistent/b.ttf"})
-	if err == nil {
-		t.Fatal("loadFont succeeded with no fonts available")
-	}
-	if !contains(err.Error(), "/nonexistent/a.ttf") {
-		t.Errorf("error = %q, want it to name the paths tried", err)
-	}
 }
 
 func TestLoadFacesUsesTheSystemFont(t *testing.T) {
@@ -274,7 +284,11 @@ func TestLoadFacesUsesTheSystemFont(t *testing.T) {
 	if err != nil {
 		t.Skipf("no system font available: %v", err)
 	}
-	defer f.close()
+	t.Cleanup(func() {
+		if err := f.close(); err != nil {
+			t.Errorf("closing the faces: %v", err)
+		}
+	})
 	if f.query == nil || f.name == nil || f.detail == nil {
 		t.Fatal("loadFaces returned a nil face")
 	}
@@ -311,17 +325,7 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-func contains(s, sub string) bool  { return len(s) >= len(sub) && indexOf(s, sub) >= 0 }
 func hasSuffix(s, suf string) bool { return len(s) >= len(suf) && s[len(s)-len(suf):] == suf }
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
-}
 
 func TestMetricsRowAt(t *testing.T) {
 	m := newMetrics(1)

@@ -117,7 +117,12 @@ const (
 // pure-Go rasterisers draw this desktop's SVGs badly enough to be worse
 // than the placeholder (see internal/icons), so an SVG comes back as an
 // error and the caller falls back to an icon it has.
-func LoadImageFile(path string) (image.Image, error) {
+//
+// A file that does not exist comes back wrapping fs.ErrNotExist, and one in
+// a format not understood here (SVG) wrapping image.ErrFormat: those are
+// the everyday reasons to fall back, and a caller can tell them apart from
+// a file that is really broken.
+func LoadImageFile(path string) (img image.Image, err error) {
 	// O_NONBLOCK so that a path naming a FIFO fails instead of hanging the
 	// daemon until something writes to it. On a regular file it changes
 	// nothing.
@@ -126,7 +131,13 @@ func LoadImageFile(path string) (image.Image, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening image: %w", err)
 	}
-	defer f.Close() //nolint:errcheck // read-only
+	defer func() {
+		// Read-only, so a failed close loses nothing; it is still reported,
+		// alongside whatever else went wrong.
+		if closeErr := f.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing image %s: %w", path, closeErr))
+		}
+	}()
 
 	st, err := f.Stat()
 	if err != nil {
@@ -149,9 +160,9 @@ func LoadImageFile(path string) (image.Image, error) {
 	if _, seekErr := f.Seek(0, io.SeekStart); seekErr != nil {
 		return nil, fmt.Errorf("rewinding image: %w", seekErr)
 	}
-	img, _, err := image.Decode(io.LimitReader(f, maxImageFileBytes))
+	decoded, _, err := image.Decode(io.LimitReader(f, maxImageFileBytes))
 	if err != nil {
 		return nil, fmt.Errorf("decoding image %s: %w", path, err)
 	}
-	return img, nil
+	return decoded, nil
 }

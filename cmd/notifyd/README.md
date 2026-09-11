@@ -162,10 +162,20 @@ action, or right-click to dismiss it.
 
 ## Debugging
 
-`notifyd -v` logs every notification, action and closure, and why an image
-could not be loaded. When started by the bus its stderr goes to the journal:
-`journalctl --user -t dbus-daemon`. `-replace` takes the bus name from a
-running daemon that allows it.
+Errors are always logged: X errors, a bus that has gone, settings that
+could not be read, a banner that could not be drawn, and what was wrong
+with a notification a client sent (a malformed image, a hint of the wrong
+type). Those that can repeat -- per frame, per event, per sender -- are
+limited to a few lines a minute each, and the lines held back are counted.
+`notifyd -v` adds a trace of every notification, action and closure, and
+do-not-disturb changes. When started by the bus, its stderr is the journal
+stream it inherits from the bus, so the journal files its lines under
+`dbus.service` and labels them `dbus-daemon`, not notifyd. Filter on the
+prefix every line carries:
+
+    journalctl --user -u dbus.service | grep 'notifyd:'
+
+`-replace` takes the bus name from a running daemon that allows it.
 
 ## Notes on the implementation
 

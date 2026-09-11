@@ -3,6 +3,8 @@ package launch
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"syscall"
@@ -45,8 +47,11 @@ type Result struct {
 //
 // A failure to enumerate windows is not fatal: if X cannot be read we
 // cannot know whether the app is running, and starting a second copy is a
-// far better failure than doing nothing. The error is returned alongside
-// the result so the caller can log it.
+// far better failure than doing nothing. When the start then succeeds, so
+// does Open, and the window-list failure is logged here as a warning. It
+// used to be returned alongside the successful start, and callers --
+// reasonably -- took a non-nil error to mean nothing was started: the
+// launcher stayed open, so a second Enter started a second copy.
 func (l *Launcher) Open(app *desktop.App) (Result, error) {
 	if len(app.Argv) == 0 {
 		return Result{}, fmt.Errorf("%s has no command to run", app.Name)
@@ -57,7 +62,8 @@ func (l *Launcher) Open(app *desktop.App) (Result, error) {
 		if spawnErr := l.spawn(app); spawnErr != nil {
 			return Result{}, errors.Join(err, spawnErr)
 		}
-		return Result{}, fmt.Errorf("could not check for an existing window, started a new one: %w", err)
+		log.Printf("could not check whether %s was already running, started it anyway: %v", app.Name, err)
+		return Result{}, nil
 	}
 
 	if win, conf := Match(app, wins, l.Exe); conf > None {
@@ -108,7 +114,6 @@ func SpawnDetached(app *desktop.App) error {
 	if err != nil {
 		return fmt.Errorf("opening %s: %w", os.DevNull, err)
 	}
-	defer devNull.Close() //nolint:errcheck // the child holds its own dup
 
 	// exec.Command, not CommandContext: the whole point is a process that
 	// outlives this one. Tying it to a context would kill the application
@@ -119,23 +124,39 @@ func SpawnDetached(app *desktop.App) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	// Start in the user's home rather than wherever the launcher was
 	// started, so a file dialog in the new app opens somewhere sensible.
-	if home, err := os.UserHomeDir(); err == nil {
+	// Without one the app still starts, just from here.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Printf("no home directory, starting %s in the current directory: %v", app.Name, err)
+	} else {
 		cmd.Dir = home
 	}
 
-	if err := cmd.Start(); err != nil {
-		return err
+	// Our /dev/null is done with once Start returns: the child has its own
+	// copies of the descriptor, or never got any.
+	startErr := cmd.Start()
+	closeErr := devNull.Close()
+	if startErr != nil {
+		return errors.Join(startErr, closeErr)
 	}
+	if closeErr != nil {
+		// The app is running. Returning this would tell the caller the
+		// start failed, and it would start a second copy.
+		log.Printf("closing %s after starting %s: %v", os.DevNull, app.Name, closeErr)
+	}
+
 	// Reap the child when it exits. Without this every app launched in a
 	// session leaves a zombie behind, since Setsid does not detach it from
 	// us as a parent -- only from the terminal.
 	//
-	// The exit status is genuinely uninteresting: by the time it arrives
-	// the user has moved on, and a GUI app exiting non-zero hours later is
-	// not something the launcher can act on.
+	// Nothing can be done about a non-zero exit by the time it arrives,
+	// but it is logged: in the dock, which outlives what it starts, that
+	// line is the only trace of an app that crashed on startup. The
+	// launcher exits long before and never gets to print it.
 	go func() {
-		//nolint:errcheck // see above: nothing can be done with the status
-		_ = cmd.Wait()
+		if err := cmd.Wait(); err != nil {
+			log.Printf("%s exited: %v", app.Name, err)
+		}
 	}()
 	return nil
 }
@@ -158,13 +179,23 @@ var terminalCandidates = []string{
 // terminal emulator. Every candidate accepts -e followed by the command,
 // which is the one piece of terminal command-line syntax that is actually
 // portable.
+//
+// A candidate that is not installed is skipped quietly; most of them are
+// not, on any one machine. Any other lookup failure (one that is installed
+// but not executable, say) is kept, and all of them are in the error if no
+// candidate works, since one of them is probably the terminal the user has.
 func wrapInTerminal(argv []string) ([]string, error) {
+	var errs []error
 	for _, term := range terminalCandidates {
 		path, err := exec.LookPath(term)
 		if err != nil {
+			if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+				continue // not installed
+			}
+			errs = append(errs, err)
 			continue
 		}
 		return append([]string{path, "-e"}, argv...), nil
 	}
-	return nil, fmt.Errorf("no terminal emulator found (tried %v)", terminalCandidates)
+	return nil, errors.Join(append([]error{fmt.Errorf("no terminal emulator found (tried %v)", terminalCandidates)}, errs...)...)
 }

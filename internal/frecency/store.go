@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -39,18 +40,31 @@ func DefaultPath() (string, error) {
 // A missing file is not an error -- it is what the first run looks like.
 // A corrupt one is reported, but an empty store is still returned, so the
 // launcher opens with no ranking memory rather than not opening.
+//
+// The corrupt file is moved aside to path + ".corrupt" first. Otherwise
+// the next Save -- the very next launch -- would replace it with the empty
+// store, and whatever history was still recoverable from it would go with
+// it. If it cannot be moved, the store returned has no path, so Save
+// refuses rather than overwrite it; the history is worth more than one
+// session's worth of new usage.
 func Load(path string) (*Store, error) {
 	s := New(path)
 
 	data, err := os.ReadFile(path) //nolint:gosec // path is ours, from DefaultPath or a flag
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return s, nil
 		}
 		return s, fmt.Errorf("reading %s: %w", path, err)
 	}
 	if err := json.Unmarshal(data, s); err != nil {
-		return New(path), fmt.Errorf("parsing %s: %w", path, err)
+		aside := path + ".corrupt"
+		if mvErr := os.Rename(path, aside); mvErr != nil {
+			return New(""), errors.Join(
+				fmt.Errorf("parsing %s: %w", path, err),
+				fmt.Errorf("moving it aside so it is not overwritten, usage will not be saved this run: %w", mvErr))
+		}
+		return New(path), fmt.Errorf("parsing %s, moved it to %s and starting afresh: %w", path, aside, err)
 	}
 	// Unmarshalling over the zero value leaves nil maps when the file has
 	// no such key; every caller then writes to a nil map and panics.
@@ -71,7 +85,7 @@ func Load(path string) (*Store, error) {
 // sees either the old file or the new one, never a half-written one. The
 // same directory matters -- a rename across filesystems is not atomic and
 // fails outright.
-func (s *Store) Save(now time.Time) error {
+func (s *Store) Save(now time.Time) (saveErr error) {
 	if s.path == "" {
 		return errors.New("no path to save to")
 	}
@@ -92,23 +106,48 @@ func (s *Store) Save(now time.Time) error {
 		return fmt.Errorf("creating a temporary file in %s: %w", dir, err)
 	}
 	tmpName := tmp.Name()
-	// Any failure from here on leaves the temporary file behind, so every
-	// path removes it. Remove after a successful rename is harmless: the
-	// name no longer exists.
-	defer os.Remove(tmpName) //nolint:errcheck // best effort cleanup
+	// Any failure from here on leaves the temporary file behind, so a
+	// failing Save removes it. A successful one has renamed it away and
+	// there is nothing to remove. If it is already gone that is the outcome
+	// wanted; any other failure to remove it is reported with the error
+	// that caused it, since it leaves a file behind in the user's state
+	// directory.
+	defer func() {
+		if saveErr == nil {
+			return
+		}
+		if rmErr := os.Remove(tmpName); rmErr != nil {
+			if errors.Is(rmErr, fs.ErrNotExist) {
+				return
+			}
+			saveErr = errors.Join(saveErr, fmt.Errorf("removing %s: %w", tmpName, rmErr))
+		}
+	}()
 
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close() //nolint:errcheck,gosec // already failing
-		return fmt.Errorf("writing %s: %w", tmpName, err)
+		return errors.Join(fmt.Errorf("writing %s: %w", tmpName, err), closeFile(tmp))
 	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing %s: %w", tmpName, err)
+	// Sync before the rename: without it a crash shortly after can leave
+	// the rename on disk and the data not, which is the empty file the
+	// write-and-rename was meant to rule out.
+	if err := tmp.Sync(); err != nil {
+		return errors.Join(fmt.Errorf("syncing %s: %w", tmpName, err), closeFile(tmp))
+	}
+	if err := closeFile(tmp); err != nil {
+		return err
 	}
 	if err := os.Chmod(tmpName, 0o600); err != nil {
 		return fmt.Errorf("setting permissions on %s: %w", tmpName, err)
 	}
 	if err := os.Rename(tmpName, s.path); err != nil {
 		return fmt.Errorf("replacing %s: %w", s.path, err)
+	}
+	return nil
+}
+
+func closeFile(f *os.File) error {
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing %s: %w", f.Name(), err)
 	}
 	return nil
 }

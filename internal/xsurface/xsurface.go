@@ -10,6 +10,7 @@
 package xsurface
 
 import (
+	"errors"
 	"fmt"
 	"image"
 
@@ -57,14 +58,23 @@ func New(conn *xgb.Conn, win xproto.Window, depth byte, width, height int) (*Sur
 		return nil, fmt.Errorf("creating the pixmap: %w", pxErr)
 	}
 
+	// Past this point a failure owns a pixmap on the server, which lives as
+	// long as the connection does unless it is given back.
+	freePixmap := func(cause error) error {
+		if freeErr := xproto.FreePixmapChecked(conn, pixmap).Check(); freeErr != nil {
+			return errors.Join(cause, fmt.Errorf("freeing the pixmap: %w", freeErr))
+		}
+		return cause
+	}
+
 	gc, err := xproto.NewGcontextId(conn)
 	if err != nil {
-		return nil, fmt.Errorf("allocating a graphics context id: %w", err)
+		return nil, freePixmap(fmt.Errorf("allocating a graphics context id: %w", err))
 	}
 	// The GC is made against the pixmap, not the window: they must share a
 	// depth, and on an ARGB dock the window is 32-bit while the root is 24.
 	if gcErr := xproto.CreateGCChecked(conn, gc, xproto.Drawable(pixmap), 0, nil).Check(); gcErr != nil {
-		return nil, fmt.Errorf("creating the graphics context: %w", gcErr)
+		return nil, freePixmap(fmt.Errorf("creating the graphics context: %w", gcErr))
 	}
 
 	setup := xproto.Setup(conn)
@@ -169,13 +179,38 @@ func (s *Surface) encode() {
 }
 
 // Close releases the server-side resources.
-func (s *Surface) Close() {
+//
+// The frees are checked, unlike the drawing requests: a failure here means
+// the ids were already wrong, which is worth hearing about before the next
+// frame draws into them. Both requests are sent before either is checked,
+// so the check costs one round trip rather than two -- a resize on the way
+// to revealing the dock goes through here, and that is latency the user
+// feels.
+func (s *Surface) Close() error {
+	var (
+		gcCookie     *xproto.FreeGCCookie
+		pixmapCookie *xproto.FreePixmapCookie
+	)
 	if s.gc != 0 {
-		xproto.FreeGC(s.conn, s.gc)
+		c := xproto.FreeGCChecked(s.conn, s.gc)
+		gcCookie = &c
 		s.gc = 0
 	}
 	if s.pixmap != 0 {
-		xproto.FreePixmap(s.conn, s.pixmap)
+		c := xproto.FreePixmapChecked(s.conn, s.pixmap)
+		pixmapCookie = &c
 		s.pixmap = 0
 	}
+	var errs []error
+	if gcCookie != nil {
+		if err := gcCookie.Check(); err != nil {
+			errs = append(errs, fmt.Errorf("freeing the graphics context: %w", err))
+		}
+	}
+	if pixmapCookie != nil {
+		if err := pixmapCookie.Check(); err != nil {
+			errs = append(errs, fmt.Errorf("freeing the pixmap: %w", err))
+		}
+	}
+	return errors.Join(errs...)
 }

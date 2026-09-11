@@ -3,6 +3,8 @@ package calc
 import (
 	"errors"
 	"math"
+	"math/rand/v2"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -279,6 +281,106 @@ func FuzzEval(f *testing.F) {
 		// A successful evaluation must produce something Format can render
 		// without panicking, since that is exactly what the UI does next.
 		_ = Format(v)
+	})
+}
+
+// A well-formed number that does not fit is out of range, and the error
+// must say so and carry strconv's sentinel rather than claim the text is
+// not a number at all.
+func TestLexReportsOutOfRange(t *testing.T) {
+	for _, expr := range []string{"0x1ffffffffffffffff", "1e999", "2 * 1e999"} {
+		t.Run(expr, func(t *testing.T) {
+			_, err := Eval(expr)
+			if err == nil {
+				t.Fatalf("Eval(%q) succeeded, want out of range", expr)
+			}
+			if !errors.Is(err, strconv.ErrRange) {
+				t.Errorf("Eval(%q) error = %v, want it to wrap strconv.ErrRange", expr, err)
+			}
+			if !strings.Contains(err.Error(), "out of range") {
+				t.Errorf("Eval(%q) error = %q, want it to say out of range", expr, err)
+			}
+			if strings.Contains(err.Error(), "strconv.") {
+				t.Errorf("Eval(%q) error = %q, want strconv's framing stripped: the user reads this", expr, err)
+			}
+		})
+	}
+}
+
+// roundViaText is the definition roundSignificant must agree with: print
+// the value at display precision and read it back.
+func roundViaText(t *testing.T, v float64) float64 {
+	t.Helper()
+	s := strconv.FormatFloat(v, 'g', displayPrecision, 64)
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		t.Fatalf("re-parsing %q: %v", s, err)
+	}
+	return f
+}
+
+func checkRoundSignificant(t *testing.T, v float64) {
+	t.Helper()
+	got, want := roundSignificant(v), roundViaText(t, v)
+	if math.Float64bits(got) != math.Float64bits(want) {
+		t.Errorf("roundSignificant(%v) = %v, want %v (as printed and re-parsed)", v, got, want)
+	}
+}
+
+func TestRoundSignificantMatchesTheTextRoundTrip(t *testing.T) {
+	edges := []float64{
+		0, math.Copysign(0, -1), 1, -1, 0.1 + 0.2, 1.0 / 3.0, math.Pi, 1e15, 1e-7,
+		// Exact ties at the 13th digit, which go to the even neighbour.
+		1000000000005, 1000000000015, -1000000000025, 123456789012.5,
+		// Carries that change the exponent.
+		999999999999.5, 9.9999999999995, 0.99999999999995,
+		// Powers of ten, where Log10's estimate is most likely to be off.
+		1e22, 1e23, 1e-5, 1e-300, 1e300, 999999999999999999,
+		// The ends of the range.
+		math.MaxFloat64, -math.MaxFloat64, math.SmallestNonzeroFloat64, 2.2250738585072014e-308,
+		1 << 53, 1<<53 + 2,
+	}
+	for _, v := range edges {
+		checkRoundSignificant(t, v)
+	}
+
+	// Random bit patterns cover every exponent; random ordinary values
+	// cover the numbers people actually type.
+	r := rand.New(rand.NewPCG(1, 2))
+	for range 20000 {
+		v := math.Float64frombits(r.Uint64())
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			continue
+		}
+		checkRoundSignificant(t, v)
+	}
+	for range 20000 {
+		checkRoundSignificant(t, (r.Float64()-0.5)*math.Pow(10, float64(r.IntN(30)-10)))
+	}
+}
+
+func TestRoundSignificantPassesNonFiniteThrough(t *testing.T) {
+	for _, v := range []float64{math.Inf(1), math.Inf(-1)} {
+		if got := roundSignificant(v); got != v {
+			t.Errorf("roundSignificant(%v) = %v", v, got)
+		}
+	}
+	if got := roundSignificant(math.NaN()); !math.IsNaN(got) {
+		t.Errorf("roundSignificant(NaN) = %v", got)
+	}
+}
+
+// FuzzRoundSignificant holds the exact rounding to the text round trip it
+// replaced, for any finite value.
+func FuzzRoundSignificant(f *testing.F) {
+	for _, v := range []float64{0.1 + 0.2, 1000000000005, 999999999999.5, math.MaxFloat64, math.SmallestNonzeroFloat64, -1e-300} {
+		f.Add(v)
+	}
+	f.Fuzz(func(t *testing.T, v float64) {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			t.Skip()
+		}
+		checkRoundSignificant(t, v)
 	})
 }
 

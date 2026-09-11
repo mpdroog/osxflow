@@ -7,13 +7,17 @@
 package launch
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mpdroog/osxflow/internal/desktop"
+	"github.com/mpdroog/osxflow/internal/errlog"
 	"github.com/mpdroog/osxflow/internal/xwin"
 )
 
@@ -59,6 +63,10 @@ func (c Confidence) String() string {
 // ExeFunc resolves a pid to the absolute path of its running executable.
 type ExeFunc func(pid uint32) (string, error)
 
+// ErrNoPID is ProcExe's answer for pid 0: a window that never set
+// _NET_WM_PID, so there is no process to ask about.
+var ErrNoPID = errors.New("window has no pid")
+
 // ProcExe is the real ExeFunc: /proc/<pid>/exe is a symlink to the binary,
 // already fully resolved by the kernel.
 //
@@ -66,16 +74,43 @@ type ExeFunc func(pid uint32) (string, error)
 // exactly these cases: a .desktop Exec that names a shell wrapper reports
 // the wrapped binary here (so the paths differ and the match must come
 // from WM_CLASS instead), and a window belonging to another user's process
-// reports a permission error.
+// reports a permission error. A process that has exited, or is a zombie
+// whose window has not gone yet, reports fs.ErrNotExist.
 func ProcExe(pid uint32) (string, error) {
 	if pid == 0 {
-		return "", fmt.Errorf("no pid")
+		return "", ErrNoPID
 	}
 	path, err := os.Readlink("/proc/" + strconv.FormatUint(uint64(pid), 10) + "/exe")
 	if err != nil {
 		return "", fmt.Errorf("reading /proc/%d/exe: %w", pid, err)
 	}
 	return path, nil
+}
+
+// exeLog reports ExeFunc failures that are not one of the expected
+// absences. It is limited per pid because Index.Owner, which reports
+// through it, runs in the dock several times a second: one stuck process
+// must not fill the log, and must not be forgotten either.
+var exeLog = &errlog.Limiter{Burst: 1, Per: time.Minute}
+
+// exePath asks exe for pid's executable, for matching.
+//
+// Three failures are not failures here but answers, and stay quiet: no
+// pid, a process that has already exited, and a process belonging to
+// someone else. In each the executable rule simply cannot apply and the
+// window is matched by class instead, which is what the fallbacks are for.
+// Anything else means /proc is not behaving the way the matcher relies on,
+// and is logged; the match still falls back to class.
+func exePath(exe ExeFunc, pid uint32) (string, bool) {
+	path, err := exe(pid)
+	if err != nil {
+		if !errors.Is(err, ErrNoPID) && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, fs.ErrPermission) {
+			exeLog.Printf("exe:"+strconv.FormatUint(uint64(pid), 10),
+				"matching windows by executable: %v", err)
+		}
+		return "", false
+	}
+	return path, true
 }
 
 // Match finds the best window belonging to app.
@@ -98,7 +133,7 @@ func Match(app *desktop.App, wins []xwin.Window, exe ExeFunc) (win xwin.Window, 
 
 func score(app *desktop.App, w *xwin.Window, exe ExeFunc) Confidence {
 	if app.Binary != "" && w.PID != 0 && exe != nil {
-		if path, err := exe(w.PID); err == nil && path == app.Binary {
+		if path, ok := exePath(exe, w.PID); ok && path == app.Binary {
 			return ByExecutable
 		}
 	}

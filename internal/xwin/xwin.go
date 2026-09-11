@@ -32,7 +32,7 @@ type Window struct {
 	// that does not, and they are correctly unmatchable.
 	PID uint32
 
-	// Type is the last atom of _NET_WM_WINDOW_TYPE with the
+	// Type is the first atom of _NET_WM_WINDOW_TYPE with the
 	// "_NET_WM_WINDOW_TYPE_" prefix removed ("NORMAL", "DOCK", "DESKTOP"),
 	// or "" when the window declares none.
 	//

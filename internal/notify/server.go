@@ -41,7 +41,10 @@ var Capabilities = []string{
 // goroutines at once.
 type Handler interface {
 	Notify(req *Request) uint32
-	CloseNotification(id uint32)
+
+	// CloseNotification reports whether there was a notification with this
+	// id to close.
+	CloseNotification(id uint32) bool
 }
 
 // Info is what GetServerInformation reports about the implementation.
@@ -61,7 +64,9 @@ type Server struct {
 	conn  *dbus.Conn
 	calls chan func()
 	done  chan struct{}
-	once  sync.Once
+
+	once     sync.Once
+	closeErr error
 }
 
 // Serve exports the notification interface on conn and claims the bus
@@ -95,7 +100,7 @@ func Serve(conn *dbus.Conn, h Handler, info Info, replace bool) (*Server, error)
 		return nil, fmt.Errorf("requesting %s: %w", BusName, err)
 	}
 	if reply != dbus.RequestNameReplyPrimaryOwner {
-		return nil, ErrNameTaken
+		return nil, fmt.Errorf("%w (RequestName reply %d)", ErrNameTaken, reply)
 	}
 	return s, nil
 }
@@ -104,16 +109,24 @@ func Serve(conn *dbus.Conn, h Handler, info Info, replace bool) (*Server, error)
 // what arrives, on the goroutine that owns the daemon's state.
 func (s *Server) Calls() <-chan func() { return s.calls }
 
-// Close gives up the bus name and fails any call still waiting.
-func (s *Server) Close() {
+// Close gives up the bus name and fails any call still waiting. Calling it
+// again does nothing and returns what the first call did.
+//
+// Releasing is a courtesy -- the bus drops the name anyway when the
+// connection closes, which is usually moments away -- but a failure still
+// says something about the bus, so it is reported rather than swallowed.
+func (s *Server) Close() error {
 	s.once.Do(func() {
 		close(s.done)
-		// Releasing is a courtesy: the bus drops the name anyway when the
-		// connection closes, which is moments away.
-		if _, err := s.conn.ReleaseName(BusName); err != nil {
-			_ = err
+		reply, err := s.conn.ReleaseName(BusName)
+		switch {
+		case err != nil:
+			s.closeErr = fmt.Errorf("releasing %s: %w", BusName, err)
+		case reply != dbus.ReleaseNameReplyReleased:
+			s.closeErr = fmt.Errorf("releasing %s: the bus answered %d, not released", BusName, reply)
 		}
 	})
+	return s.closeErr
 }
 
 // EmitClosed sends NotificationClosed.
@@ -191,6 +204,14 @@ func (o *object) Notify(appName string, replacesID uint32, appIcon, summary, bod
 }
 
 // CloseNotification implements org.freedesktop.Notifications.CloseNotification.
+//
+// An id that is not open -- never issued, or already closed -- is answered
+// with success, not the empty error the specification asks for, as this
+// daemon always answered it. Closing a notification that has just expired
+// is a race every client loses now and then, and an error reply turns that
+// race into a libnotify warning or an uncaught exception in the client --
+// for something the client could neither prevent nor act on. The handler
+// still learns whether the id was open, for its trace.
 func (o *object) CloseNotification(id uint32) *dbus.Error {
 	return o.s.run(func() { o.h.CloseNotification(id) })
 }

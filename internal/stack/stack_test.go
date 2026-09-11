@@ -1,10 +1,12 @@
 package stack
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -166,8 +168,8 @@ func TestTrashEntriesEmptyAndMissing(t *testing.T) {
 	if err != nil || len(got) != 0 {
 		t.Errorf("empty trash: got %v, %v", got, err)
 	}
-	if TrashCount(dir) != 0 {
-		t.Error("TrashCount on an empty trash is not 0")
+	if n, countErr := TrashCount(dir); n != 0 || countErr != nil {
+		t.Errorf("TrashCount on an empty trash = %d, %v; want 0, nil", n, countErr)
 	}
 
 	// A trash directory that was never created is not an error.
@@ -176,8 +178,48 @@ func TestTrashEntriesEmptyAndMissing(t *testing.T) {
 	if err != nil || got != nil {
 		t.Errorf("missing trash: got %v, %v; want nil, nil", got, err)
 	}
-	if TrashCount(missing) != 0 {
-		t.Error("TrashCount on a missing trash is not 0")
+	if n, err := TrashCount(missing); n != 0 || err != nil {
+		t.Errorf("TrashCount on a missing trash = %d, %v; want 0, nil", n, err)
+	}
+}
+
+// TestTrashUnreadableIsAnError is the other half of the one above: a trash
+// that exists but cannot be listed is not "empty", and saying so would
+// show the empty icon over a trash full of files.
+func TestTrashUnreadableIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	// A regular file where the files directory should be makes ReadDir fail
+	// with something other than "does not exist", and works as any user.
+	writeFile(t, filepath.Join(dir, "files"), "not a directory", time.Time{})
+
+	if n, err := TrashCount(dir); err == nil {
+		t.Errorf("TrashCount = %d, nil; want an error", n)
+	}
+	if got, err := TrashEntries(dir, 5); err == nil {
+		t.Errorf("TrashEntries = %v, nil; want an error", entryNames(got))
+	}
+}
+
+// TestTrashEntriesReportsBadTrashInfo keeps the entry -- the file is
+// there, and the user can see it in their file manager -- but says that
+// its .trashinfo could not be understood.
+func TestTrashEntriesReportsBadTrashInfo(t *testing.T) {
+	dir := makeTrash(t)
+	trashItem(t, dir, "good.txt", "2026-01-01T09:00:00", time.Now())
+	trashItem(t, dir, "bad.txt", "yesterday-ish", time.Now())
+
+	got, err := TrashEntries(dir, 5)
+	if err == nil {
+		t.Fatal("a malformed DeletionDate was not reported")
+	}
+	if errors.Is(err, errNoDeletionDate) {
+		t.Errorf("malformed date reported as absent: %v", err)
+	}
+	if !strings.Contains(err.Error(), "bad.txt.trashinfo") {
+		t.Errorf("error %q does not name the file", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("entries = %v; the file with the bad .trashinfo should be kept", entryNames(got))
 	}
 }
 
@@ -186,8 +228,8 @@ func TestTrashCount(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		trashItem(t, dir, string(rune('a'+i))+".txt", "", time.Now())
 	}
-	if got := TrashCount(dir); got != 3 {
-		t.Errorf("TrashCount = %d, want 3", got)
+	if got, err := TrashCount(dir); got != 3 || err != nil {
+		t.Errorf("TrashCount = %d, %v; want 3, nil", got, err)
 	}
 }
 
@@ -195,25 +237,47 @@ func TestParseTrashInfo(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		in   string
-		ok   bool
-		year int
+		// absent is set when the file simply does not say, which callers
+		// stay quiet about; bad when it says something unreadable.
+		absent, bad bool
+		year        int
 	}{
-		{"normal", "[Trash Info]\nPath=/x\nDeletionDate=2026-08-24T20:42:11\n", true, 2026},
-		{"spaces", "DeletionDate= 2026-08-24T20:42:11 \n", true, 2026},
-		{"missing", "[Trash Info]\nPath=/x\n", false, 0},
-		{"malformed date", "DeletionDate=not-a-date\n", false, 0},
-		{"empty", "", false, 0},
-		{"truncated", "[Trash Info]\nPath=/x\nDeletionDa", false, 0},
+		{"normal", "[Trash Info]\nPath=/x\nDeletionDate=2026-08-24T20:42:11\n", false, false, 2026},
+		{"spaces", "DeletionDate= 2026-08-24T20:42:11 \n", false, false, 2026},
+		{"missing", "[Trash Info]\nPath=/x\n", true, false, 0},
+		{"malformed date", "DeletionDate=not-a-date\n", false, true, 0},
+		{"empty", "", true, false, 0},
+		{"truncated", "[Trash Info]\nPath=/x\nDeletionDa", true, false, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := parseTrashInfo(strings.NewReader(tc.in))
-			if ok != tc.ok {
-				t.Fatalf("ok = %v, want %v", ok, tc.ok)
-			}
-			if ok && got.Year() != tc.year {
-				t.Errorf("year = %d, want %d", got.Year(), tc.year)
+			got, err := parseTrashInfo(strings.NewReader(tc.in))
+			switch {
+			case tc.absent:
+				if !errors.Is(err, errNoDeletionDate) {
+					t.Fatalf("err = %v, want errNoDeletionDate", err)
+				}
+			case tc.bad:
+				if err == nil || errors.Is(err, errNoDeletionDate) {
+					t.Fatalf("err = %v, want a parse error distinct from absence", err)
+				}
+			default:
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Year() != tc.year {
+					t.Errorf("year = %d, want %d", got.Year(), tc.year)
+				}
 			}
 		})
+	}
+}
+
+// TestParseTrashInfoReadError is the case a scanner hides unless asked: a
+// read that fails part-way must not look like a file without the key.
+func TestParseTrashInfoReadError(t *testing.T) {
+	failing := iotest.ErrReader(errors.New("disk on fire"))
+	if _, err := parseTrashInfo(failing); err == nil || errors.Is(err, errNoDeletionDate) {
+		t.Errorf("err = %v, want the read error", err)
 	}
 }
 
@@ -233,7 +297,10 @@ func TestParseUserDirs(t *testing.T) {
 		{"empty", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseUserDirs(strings.NewReader(tc.in), home, "XDG_DOWNLOAD_DIR")
+			got, err := parseUserDirs(strings.NewReader(tc.in), home, "XDG_DOWNLOAD_DIR")
+			if err != nil {
+				t.Fatal(err)
+			}
 			if got != tc.want {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
@@ -241,19 +308,74 @@ func TestParseUserDirs(t *testing.T) {
 	}
 }
 
+// TestParseUserDirsReportsLongLine: bufio.Scanner stops at a line longer
+// than its buffer, and without checking Err that reads as "key not set".
+func TestParseUserDirsReportsLongLine(t *testing.T) {
+	in := strings.Repeat("x", 100_000) + "\nXDG_DOWNLOAD_DIR=\"/dl\"\n"
+	if got, err := parseUserDirs(strings.NewReader(in), "/h", "XDG_DOWNLOAD_DIR"); err == nil {
+		t.Errorf("got %q, nil; want an error for a line the scanner cannot hold", got)
+	}
+}
+
 func TestDirsResolve(t *testing.T) {
-	if d := DownloadsDir(); d == "" || !filepath.IsAbs(d) {
+	d, err := DownloadsDir()
+	if err != nil {
+		t.Logf("DownloadsDir: %v", err) // the machine's own config; the path must still be usable
+	}
+	if d == "" || !filepath.IsAbs(d) {
 		t.Errorf("DownloadsDir = %q, want an absolute path", d)
 	}
-	if d := TrashDir(); d == "" || !filepath.IsAbs(d) {
+	d, err = TrashDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d == "" || !filepath.IsAbs(d) {
 		t.Errorf("TrashDir = %q, want an absolute path", d)
 	}
 }
 
 func TestTrashDirHonoursXDGDataHome(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", "/custom/data")
-	if got := TrashDir(); got != "/custom/data/Trash" {
-		t.Errorf("TrashDir = %q, want /custom/data/Trash", got)
+	if got, err := TrashDir(); got != "/custom/data/Trash" || err != nil {
+		t.Errorf("TrashDir = %q, %v; want /custom/data/Trash, nil", got, err)
+	}
+}
+
+func TestDownloadsDirFromUserDirs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeFile(t, filepath.Join(home, ".config", "user-dirs.dirs"),
+		"XDG_DOWNLOAD_DIR=\"$HOME/Binnen\"\n", time.Time{})
+	if got, err := DownloadsDir(); got != filepath.Join(home, "Binnen") || err != nil {
+		t.Errorf("DownloadsDir = %q, %v; want %q, nil", got, err, filepath.Join(home, "Binnen"))
+	}
+}
+
+// TestDownloadsDirWithoutUserDirs: no user-dirs.dirs is the ordinary case
+// and says nothing.
+func TestDownloadsDirWithoutUserDirs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if got, err := DownloadsDir(); got != filepath.Join(home, "Downloads") || err != nil {
+		t.Errorf("DownloadsDir = %q, %v; want ~/Downloads, nil", got, err)
+	}
+}
+
+// TestDownloadsDirUnreadableUserDirs still answers with ~/Downloads, but
+// says why that may not be the folder the user configured.
+func TestDownloadsDirUnreadableUserDirs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// A directory where the file should be: opening works, reading fails.
+	if err := os.MkdirAll(filepath.Join(home, ".config", "user-dirs.dirs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := DownloadsDir()
+	if err == nil {
+		t.Error("an unreadable user-dirs.dirs was not reported")
+	}
+	if got != filepath.Join(home, "Downloads") {
+		t.Errorf("DownloadsDir = %q; want the ~/Downloads fallback alongside the error", got)
 	}
 }
 
@@ -265,9 +387,9 @@ func FuzzParseTrashInfo(f *testing.F) {
 	f.Add("DeletionDate=")
 	f.Add("")
 	f.Fuzz(func(t *testing.T, in string) {
-		when, ok := parseTrashInfo(strings.NewReader(in))
-		if !ok && !when.IsZero() {
-			t.Fatalf("returned a time %v alongside ok=false", when)
+		when, err := parseTrashInfo(strings.NewReader(in))
+		if err != nil && !when.IsZero() {
+			t.Fatalf("returned a time %v alongside %v", when, err)
 		}
 	})
 }
@@ -279,7 +401,10 @@ func FuzzParseUserDirs(f *testing.F) {
 	f.Add("XDG_DOWNLOAD_DIR=")
 	f.Add("")
 	f.Fuzz(func(t *testing.T, in string) {
-		got := parseUserDirs(strings.NewReader(in), "/home/someone", "XDG_DOWNLOAD_DIR")
+		got, err := parseUserDirs(strings.NewReader(in), "/home/someone", "XDG_DOWNLOAD_DIR")
+		if err != nil && got != "" {
+			t.Fatalf("returned %q alongside %v", got, err)
+		}
 		if got != "" && !filepath.IsAbs(got) {
 			t.Fatalf("returned a relative path %q; callers treat it as a directory to open", got)
 		}

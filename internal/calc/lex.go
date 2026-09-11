@@ -7,6 +7,7 @@ package calc
 // which of the two happened.
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -161,7 +162,9 @@ func lexNumber(rs []rune, i int) (token, int, error) {
 		// calculator, not of this branch.
 		v, err := strconv.ParseUint(text[2:], 16, 64)
 		if err != nil {
-			return token{}, 0, fmt.Errorf("%q at position %d is not a number", text, start+1)
+			// Only the digits were checked above, so the one way left to
+			// fail is a value wider than 64 bits -- which the cause says.
+			return token{}, 0, fmt.Errorf("%q at position %d is not a number: %w", text, start+1, numCause(err))
 		}
 		return token{kind: tokNumber, num: float64(v), text: text, pos: start}, i, nil
 	}
@@ -196,9 +199,23 @@ func finishNumber(rs []rune, start, end int) (token, int, error) {
 	text := string(rs[start:end])
 	v, err := strconv.ParseFloat(text, 64)
 	if err != nil {
-		return token{}, 0, fmt.Errorf("%q at position %d is not a number", text, start+1)
+		// "1e999" is well formed and still fails: it is out of range, and
+		// saying so beats calling a perfectly good-looking number not one.
+		return token{}, 0, fmt.Errorf("%q at position %d is not a number: %w", text, start+1, numCause(err))
 	}
 	return token{kind: tokNumber, num: v, text: text, pos: start}, end, nil
+}
+
+// numCause strips strconv's "strconv.ParseFloat: parsing ..." framing,
+// which repeats the text the message already quotes, leaving the reason
+// ("value out of range"). The result still matches strconv.ErrRange and
+// strconv.ErrSyntax with errors.Is.
+func numCause(err error) error {
+	var ne *strconv.NumError
+	if errors.As(err, &ne) {
+		return ne.Err
+	}
+	return err
 }
 
 func isDigit(c rune) bool    { return c >= '0' && c <= '9' }

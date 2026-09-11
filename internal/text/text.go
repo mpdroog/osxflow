@@ -9,9 +9,11 @@
 package text
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
+	"io/fs"
 	"os"
 
 	"golang.org/x/image/font"
@@ -47,26 +49,38 @@ var BoldCandidates = []string{
 // sizes instead, so that one number controls everything.
 const DPI = 72 * 96 / 72
 
+// ErrNoFont is wrapped by Load's error when no candidate could be used.
+var ErrNoFont = errors.New("no usable font found")
+
 // Load returns the first candidate that exists and parses, naming every
 // path it tried when none does.
+//
+// A candidate that does not exist is the expected case -- the list covers
+// several distributions and any one machine has one or two of them -- so
+// it is skipped without comment. Anything else (a font that cannot be read
+// or does not parse) is a real fault on this machine: once a later
+// candidate loads it is not in the way and is not reported, but when none
+// does, every such failure is in the error, because any of them could be
+// the one the user meant to have.
 func Load(candidates []string) (*sfnt.Font, string, error) {
-	var lastErr error
+	var errs []error
 	for _, path := range candidates {
 		data, err := os.ReadFile(path) //nolint:gosec // a fixed list of system font paths
 		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue // not installed on this distribution
+			}
+			errs = append(errs, fmt.Errorf("reading %s: %w", path, err))
 			continue
 		}
 		parsed, err := opentype.Parse(data)
 		if err != nil {
-			lastErr = fmt.Errorf("parsing %s: %w", path, err)
+			errs = append(errs, fmt.Errorf("parsing %s: %w", path, err))
 			continue
 		}
 		return parsed, path, nil
 	}
-	if lastErr != nil {
-		return nil, "", lastErr
-	}
-	return nil, "", fmt.Errorf("no usable font found; tried %v", candidates)
+	return nil, "", errors.Join(append([]error{fmt.Errorf("%w; tried %v", ErrNoFont, candidates)}, errs...)...)
 }
 
 // Face opens one size of a parsed font, hinted for sharpness at small

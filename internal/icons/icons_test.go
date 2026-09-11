@@ -1,8 +1,13 @@
 package icons
 
 import (
+	"bytes"
 	"image"
+	"image/png"
+	"log"
+	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // TestBuildProducedTheDocksIcons checks the generated set rather than the
@@ -24,7 +29,10 @@ func TestBuildProducedTheDocksIcons(t *testing.T) {
 }
 
 func TestNamesAreSortedAndPresent(t *testing.T) {
-	names := Names()
+	names, err := Names()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(names) == 0 {
 		t.Fatal("no icons embedded at all; run `make icons`")
 	}
@@ -70,6 +78,67 @@ func TestMasterIsCachedAndMissesAreRemembered(t *testing.T) {
 	// attempt to read the embedded filesystem.
 	if got := s.Master("definitely-not-an-icon"); got != nil {
 		t.Error("a second miss returned something")
+	}
+}
+
+// captureLog redirects the standard logger for the length of a test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+	return &buf
+}
+
+// TestCorruptIconIsLoggedOnce: a PNG that is there but will not decode
+// draws the same placeholder as one that is not there at all, so the log
+// is the only place the difference shows -- and it must show once, not
+// on every frame that draws the icon.
+func TestCorruptIconIsLoggedOnce(t *testing.T) {
+	var good bytes.Buffer
+	if err := png.Encode(&good, image.NewRGBA(image.Rect(0, 0, 4, 4))); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	s.src = fstest.MapFS{
+		"data/good.png":   {Data: good.Bytes()},
+		"data/broken.png": {Data: []byte("\x89PNG\r\n\x1a\nnot really")},
+	}
+	logged := captureLog(t)
+
+	if s.Master("good") == nil {
+		t.Fatal("a valid PNG did not decode")
+	}
+	for range 3 {
+		if img := s.At("broken", 32); img != nil {
+			t.Fatal("a corrupt PNG produced an image")
+		}
+	}
+	if got := strings.Count(logged.String(), "broken"); got != 1 {
+		t.Errorf("corrupt icon logged %d times, want once:\n%s", got, logged)
+	}
+
+	logged.Reset()
+	if s.Master("absent") != nil {
+		t.Fatal("an absent icon produced an image")
+	}
+	if logged.Len() != 0 {
+		t.Errorf("an absent icon was logged; absence is the ordinary case:\n%s", logged)
+	}
+}
+
+func TestHasSeparatesAbsenceFromFailure(t *testing.T) {
+	fsys := fstest.MapFS{"data/here.png": {Data: []byte("x")}}
+	if ok, err := has(fsys, "here"); !ok || err != nil {
+		t.Errorf("has(here) = %v, %v; want true, nil", ok, err)
+	}
+	if ok, err := has(fsys, "gone"); ok || err != nil {
+		t.Errorf("has(gone) = %v, %v; want false, nil", ok, err)
 	}
 }
 

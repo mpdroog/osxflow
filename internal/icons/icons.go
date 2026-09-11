@@ -18,10 +18,13 @@ package icons
 import (
 	"bytes"
 	"embed"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"image/png"
+	"io/fs"
+	"log"
 	"path"
 	"sort"
 	"strings"
@@ -59,6 +62,10 @@ const (
 // the cursor are ever scaled at an unusual size, and each size is produced
 // once.
 type Set struct {
+	// src is where the PNGs come from: the embedded set, or a stand-in in
+	// tests that need an icon the build would never produce.
+	src fs.FS
+
 	masters map[string]*image.RGBA
 	scaled  map[key]*image.RGBA
 	missing map[string]bool
@@ -79,6 +86,7 @@ type key struct {
 // them, so decoding them all would cost startup time for nothing.
 func New() *Set {
 	return &Set{
+		src:     data,
 		masters: make(map[string]*image.RGBA),
 		scaled:  make(map[key]*image.RGBA),
 		missing: make(map[string]bool),
@@ -86,28 +94,58 @@ func New() *Set {
 }
 
 // Has reports whether an icon was compiled in.
+//
+// It answers a yes-or-no question for callers that pass it around as one
+// (cmd/notifyd hands it to its icon index), so the only failure it can
+// meet other than "not there" is logged rather than returned. For an
+// embedded filesystem that failure should not exist at all; if it ever
+// does, it must not pass for a missing icon.
 func Has(name string) bool {
-	_, err := data.Open(path.Join("data", name+".png"))
-	return err == nil
+	ok, err := has(data, name)
+	if err != nil {
+		log.Printf("icons: %v", err)
+	}
+	return ok
 }
+
+// has is Has with the error: absence is (false, nil), anything else is an
+// error.
+func has(fsys fs.FS, name string) (bool, error) {
+	_, err := fs.Stat(fsys, iconPath(name))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("looking up icon %s: %w", name, err)
+	}
+	return true, nil
+}
+
+func iconPath(name string) string { return path.Join("data", name+".png") }
 
 // Names lists every embedded icon, sorted. Used by tests to check the
 // build produced what the dock expects.
-func Names() []string {
+func Names() ([]string, error) {
 	entries, err := data.ReadDir("data")
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("listing embedded icons: %w", err)
 	}
 	out := make([]string, 0, len(entries))
 	for _, e := range entries {
 		out = append(out, strings.TrimSuffix(e.Name(), ".png"))
 	}
 	sort.Strings(out)
-	return out
+	return out, nil
 }
 
 // Master returns the full-size artwork for an icon, or nil when the binary
 // does not carry one.
+//
+// An icon that is not there is the ordinary case -- an application
+// installed since the last build -- and the caller draws a placeholder
+// without comment. One that is there but cannot be read or decoded is a
+// build fault that would otherwise look exactly the same, so it is logged;
+// the negative cache makes that once per name rather than once per frame.
 func (s *Set) Master(name string) *image.RGBA {
 	if img, ok := s.masters[name]; ok {
 		return img
@@ -115,9 +153,12 @@ func (s *Set) Master(name string) *image.RGBA {
 	if s.missing[name] {
 		return nil
 	}
-	raw, err := data.ReadFile(path.Join("data", name+".png"))
+	raw, err := fs.ReadFile(s.src, iconPath(name))
 	if err != nil {
 		s.missing[name] = true
+		if !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("icons: reading %s: %v", name, err)
+		}
 		return nil
 	}
 	decoded, err := png.Decode(bytes.NewReader(raw))
@@ -125,6 +166,7 @@ func (s *Set) Master(name string) *image.RGBA {
 		// A corrupt embedded PNG is a build fault, not a runtime one, but
 		// the dock still has to draw something rather than stop.
 		s.missing[name] = true
+		log.Printf("icons: decoding %s: %v (run `make icons`)", name, err)
 		return nil
 	}
 	img := toRGBA(decoded)
@@ -316,14 +358,22 @@ func toRGBA(img image.Image) *image.RGBA {
 // cmd/dock calls it at startup so a missing icon is a line on stderr
 // rather than a silent blank square.
 func Verify(names []string) error {
-	var missing []string
+	var (
+		missing  []string
+		problems []error
+	)
 	for _, n := range names {
-		if !Has(n) {
+		ok, err := has(data, n)
+		switch {
+		case err != nil:
+			problems = append(problems, err)
+		case !ok:
 			missing = append(missing, n)
 		}
 	}
-	if len(missing) == 0 {
-		return nil
+	if len(missing) > 0 {
+		problems = append(problems,
+			fmt.Errorf("no embedded icon for %s (run `make icons`)", strings.Join(missing, ", ")))
 	}
-	return fmt.Errorf("no embedded icon for %s (run `make icons`)", strings.Join(missing, ", "))
+	return errors.Join(problems...)
 }

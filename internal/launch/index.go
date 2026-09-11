@@ -85,7 +85,7 @@ func (ix *Index) Apps() []desktop.App { return ix.apps }
 // else.
 func (ix *Index) Owner(w *xwin.Window, exe ExeFunc) (*desktop.App, Confidence) {
 	if w.PID != 0 && exe != nil {
-		if path, err := exe(w.PID); err == nil {
+		if path, ok := exePath(exe, w.PID); ok {
 			if app, ok := ix.byBinary[path]; ok {
 				return app, ByExecutable
 			}

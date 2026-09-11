@@ -5,8 +5,11 @@ package main
 // of times in its life, so there is nothing to gain from tracking damage.
 
 import (
+	"errors"
+	"fmt"
 	"image"
 	"image/color"
+	"log"
 
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/sfnt"
@@ -23,53 +26,79 @@ type faces struct {
 	button   font.Face
 	glyph    font.Face
 	fallback font.Face
+
+	// closeMark is what the close button shows: see closeMark.
+	closeMark string
 }
 
 func loadFaces(th *theme) (*faces, error) {
 	regular, _, err := text.Load(text.Candidates)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("loading regular font: %w", err)
 	}
 	// A missing bold weight costs the title its emphasis, not the daemon
-	// its ability to start.
+	// its ability to start. It is worth a line all the same: the fix is a
+	// font package, and nothing else would say so.
 	bold, _, boldErr := text.Load(text.BoldCandidates)
 	if boldErr != nil {
+		log.Printf("no bold font, using regular: %v", boldErr)
 		bold = regular
 	}
 	out := &faces{}
 	for _, spec := range []struct {
+		name string
 		dst  *font.Face
 		font *sfnt.Font
 		size float64
 	}{
-		{&out.title, bold, th.titlePt},
-		{&out.body, regular, th.bodyPt},
-		{&out.button, regular, th.buttonPt},
-		{&out.glyph, bold, th.closePt},
+		{"title", &out.title, bold, th.titlePt},
+		{"body", &out.body, regular, th.bodyPt},
+		{"button", &out.button, regular, th.buttonPt},
+		{"close button", &out.glyph, bold, th.closePt},
 		// For a letter on a placeholder tile, drawn at the icon master
 		// size and scaled down, as the dock does.
-		{&out.fallback, bold, 58},
+		{"placeholder", &out.fallback, bold, 58},
 	} {
 		face, faceErr := text.Face(spec.font, spec.size)
 		if faceErr != nil {
-			out.close()
-			return nil, faceErr
+			return nil, errors.Join(fmt.Errorf("%s face: %w", spec.name, faceErr), out.close())
 		}
 		*spec.dst = face
+	}
+	var ok bool
+	if out.closeMark, ok = closeMark(out.glyph); !ok {
+		log.Printf("the bold font has no %q; the close button shows %q", preferredCloseMark, out.closeMark)
 	}
 	return out, nil
 }
 
-func (f *faces) close() {
+// preferredCloseMark is the close button's glyph, as on macOS.
+const preferredCloseMark = '×'
+
+// closeMark picks the close button's glyph: the multiplication sign, or,
+// from a font without one, a plain x. Drawing a glyph the font lacks draws
+// nothing, which leaves a button with no hint of what it does. It reports
+// whether the preferred mark was available.
+func closeMark(face font.Face) (string, bool) {
+	if _, ok := face.GlyphAdvance(preferredCloseMark); ok {
+		return string(preferredCloseMark), true
+	}
+	return "x", false
+}
+
+// close releases every face. Closing one only frees a cache, so a failure
+// costs nothing, but it is reported all the same.
+func (f *faces) close() error {
+	var errs []error
 	for _, face := range []font.Face{f.title, f.body, f.button, f.glyph, f.fallback} {
 		if face == nil {
 			continue
 		}
-		// Closing a face frees a cache; nothing depends on it working.
 		if err := face.Close(); err != nil {
-			_ = err
+			errs = append(errs, fmt.Errorf("closing a font face: %w", err))
 		}
 	}
+	return errors.Join(errs...)
 }
 
 // render draws a banner in its current state and puts it on screen.
@@ -129,7 +158,7 @@ func (d *daemon) render(b *banner) {
 			bg = colCloseHover
 		}
 		paint.Circle(img, l.closeX, l.closeY, l.closeR, bg)
-		drawGlyphCentred(img, d.faces.glyph, colCloseText, l.closeX, l.closeY, "×")
+		drawGlyphCentred(img, d.faces.glyph, colCloseText, l.closeX, l.closeY, d.faces.closeMark)
 	}
 	d.flush(b)
 }

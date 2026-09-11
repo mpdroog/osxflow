@@ -2,6 +2,7 @@ package notify
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -30,10 +31,13 @@ func (f *fakeHandler) Notify(req *Request) uint32 {
 	return f.next
 }
 
-func (f *fakeHandler) CloseNotification(id uint32) {
+// CloseNotification knows every id up to the last one it handed out, and
+// no other.
+func (f *fakeHandler) CloseNotification(id uint32) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closed = append(f.closed, id)
+	return id != 0 && id <= f.next
 }
 
 func (f *fakeHandler) requests() []*Request {
@@ -60,7 +64,11 @@ func serve(t *testing.T) (*Server, *fakeHandler, *dbus.Conn) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(srv.Close)
+	t.Cleanup(func() {
+		if closeErr := srv.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+	})
 	go func() {
 		for {
 			select {
@@ -109,18 +117,41 @@ func TestNotifyReachesTheHandler(t *testing.T) {
 		t.Errorf("request = %+v", req)
 	}
 	// The hints arrive as godbus decodes them, which is what Parse expects.
-	if n := Parse(req, time.Second); n.Urgency != Critical || n.Icon.Data == nil {
+	n, problems := Parse(req, time.Second)
+	if n.Urgency != Critical || n.Icon.Data == nil {
 		t.Errorf("parsed urgency %d, image %t; want critical with an image", n.Urgency, n.Icon.Data != nil)
+	}
+	if len(problems) != 0 {
+		t.Errorf("problems with a well-formed request: %v", problems)
 	}
 }
 
 func TestCloseNotificationReachesTheHandler(t *testing.T) {
 	_, h, client := serve(t)
-	if err := daemon(client).Call(Interface+".CloseNotification", 0, uint32(7)).Err; err != nil {
+	var id uint32
+	if err := daemon(client).Call(Interface+".Notify", 0,
+		"App", uint32(0), "", "Summary", "", []string{}, map[string]dbus.Variant{}, int32(-1)).Store(&id); err != nil {
 		t.Fatal(err)
 	}
+	if err := daemon(client).Call(Interface+".CloseNotification", 0, id).Err; err != nil {
+		t.Fatal(err)
+	}
+	if got := h.closedIDs(); !slices.Equal(got, []uint32{id}) {
+		t.Fatalf("handler closed %v, want [%d]", got, id)
+	}
+}
+
+// Closing an id that is no longer open is a race clients lose routinely --
+// the notification expired a moment before -- so it succeeds rather than
+// handing the client an error it can neither prevent nor act on. The
+// handler is still asked, so it can tell.
+func TestCloseNotificationOfAnUnknownIDSucceeds(t *testing.T) {
+	_, h, client := serve(t)
+	if err := daemon(client).Call(Interface+".CloseNotification", 0, uint32(7)).Err; err != nil {
+		t.Errorf("closing an unknown id: %v, want success", err)
+	}
 	if got := h.closedIDs(); !slices.Equal(got, []uint32{7}) {
-		t.Fatalf("handler closed %v, want [7]", got)
+		t.Errorf("handler was asked about %v, want [7]", got)
 	}
 }
 
@@ -214,11 +245,35 @@ func TestASecondDaemonIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Close()
+	defer func() {
+		if closeErr := first.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+	}()
 	for _, replace := range []bool{false, true} {
-		if _, err := Serve(dbustest.Conn(t, addr), &fakeHandler{}, testInfo, replace); !errors.Is(err, ErrNameTaken) {
+		_, err := Serve(dbustest.Conn(t, addr), &fakeHandler{}, testInfo, replace)
+		if !errors.Is(err, ErrNameTaken) {
 			t.Errorf("second daemon (replace %t): err = %v, want ErrNameTaken", replace, err)
 		}
+		// The bus's answer is kept, for whoever has to work out why.
+		if want := fmt.Sprintf("reply %d", dbus.RequestNameReplyExists); err != nil && !strings.Contains(err.Error(), want) {
+			t.Errorf("second daemon (replace %t): err = %v, want it to say %q", replace, err, want)
+		}
+	}
+}
+
+func TestCloseReportsANameItNoLongerOwns(t *testing.T) {
+	addr := dbustest.Start(t)
+	conn := dbustest.Conn(t, addr)
+	srv, err := Serve(conn, &fakeHandler{}, testInfo, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, releaseErr := conn.ReleaseName(BusName); releaseErr != nil {
+		t.Fatal(releaseErr)
+	}
+	if closeErr := srv.Close(); closeErr == nil {
+		t.Fatal("Close released a name it did not own and said nothing")
 	}
 }
 
@@ -228,8 +283,12 @@ func TestCallsFailOnceClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.Close()
-	srv.Close() // twice is harmless
+	if closeErr := srv.Close(); closeErr != nil {
+		t.Fatalf("closing: %v", closeErr)
+	}
+	if closeErr := srv.Close(); closeErr != nil { // twice is harmless
+		t.Fatalf("closing again: %v", closeErr)
+	}
 	if callErr := daemon(dbustest.Conn(t, addr)).Call(Interface+".CloseNotification", 0, uint32(1)).Err; callErr == nil {
 		t.Fatal("a call succeeded after the server closed")
 	}

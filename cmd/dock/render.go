@@ -10,8 +10,7 @@ package main
 import (
 	"image"
 	"image/color"
-
-	"github.com/jezek/xgb/xproto"
+	"log"
 
 	xdraw "golang.org/x/image/draw"
 	"golang.org/x/image/font"
@@ -62,10 +61,10 @@ func (f *faces) close() {
 		if face == nil {
 			continue
 		}
-		// Closing a face frees a cache; there is nothing to do about a
-		// failure and nothing that depends on it having worked.
+		// Closing a face frees a cache. Nothing depends on it having worked,
+		// so a failure is reported rather than returned.
 		if err := face.Close(); err != nil {
-			_ = err
+			log.Printf("closing a font face: %v", err)
 		}
 	}
 }
@@ -213,30 +212,32 @@ func roundedPanel(img *image.RGBA, r image.Rectangle, radius, scale float64, bg,
 }
 
 // close releases everything the dock holds.
+//
+// The dock's two windows and its colormap are not destroyed here. The
+// connection closes a moment later, and the server frees everything a
+// client created when that client disconnects -- and a request sent now
+// unchecked could never report a failure, because the event loop that
+// would read it has already stopped. The popup and the surfaces are
+// released with checked requests, which can.
 func (d *dockApp) close() {
 	if d.popup != nil {
 		d.popup.close(d)
+		d.popup = nil
 	}
 	if d.surf != nil {
-		d.surf.Close()
-	}
-	if d.win != 0 {
-		xproto.DestroyWindow(d.conn, d.win)
-	}
-	if d.trigger != 0 {
-		xproto.DestroyWindow(d.conn, d.trigger)
-	}
-	if d.colormap != 0 {
-		xproto.FreeColormap(d.conn, d.colormap)
+		if err := d.surf.Close(); err != nil {
+			log.Printf("releasing the dock surface: %v", err)
+		}
 	}
 	if d.faces != nil {
 		d.faces.close()
 	}
 	if d.server != nil {
 		// The Server was built on this connection rather than owning one,
-		// so Close only drops its reference; there is nothing to report.
+		// so Close only drops its reference -- but it can still say it was
+		// closed twice, which would be a bug here.
 		if err := d.server.Close(); err != nil {
-			_ = err
+			log.Printf("closing window server: %v", err)
 		}
 	}
 	d.conn.Close()

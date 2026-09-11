@@ -4,10 +4,12 @@ package main
 // clicked, and going away.
 
 import (
+	"errors"
 	"fmt"
 	"image"
+	"io/fs"
+	"log"
 	"math"
-	"os"
 	"time"
 
 	"github.com/jezek/xgb"
@@ -62,14 +64,57 @@ const (
 	fadeTau  = 0.09
 )
 
+// maxAttempts is how many times in a row a notification may fail to get a
+// banner before it is closed instead. A failure can be passing -- the
+// server short of memory for a moment -- so one is not enough; but a
+// notification that can never be shown should not sit in the queue for
+// good, holding a place and telling its sender it is up.
+const maxAttempts = 3
+
+// attempts counts, per notification, the failed attempts in a row to put
+// it on screen.
+type attempts map[uint32]int
+
+// fail records one failure and reports whether that was the last allowed.
+func (a attempts) fail(id uint32) (giveUp bool) {
+	a[id]++
+	if a[id] < maxAttempts {
+		return false
+	}
+	delete(a, id)
+	return true
+}
+
+// keep forgets every notification not in live, which is the ones that have
+// closed or gone back to waiting.
+func (a attempts) keep(live map[uint32]bool) {
+	for id := range a {
+		if !live[id] {
+			delete(a, id)
+		}
+	}
+}
+
 // sync makes the banners on screen match the queue: new ones appear,
 // changed ones are redrawn, closed ones fade, and everything slides into
 // its place in the stack.
-func (d *daemon) sync() {
+//
+// A notification whose banner cannot be made (after maxAttempts tries) or
+// cannot be redrawn is closed with reason "undefined", which tells its
+// sender it is gone -- better than one that stays open and never appears.
+func (d *daemon) sync() { d.syncPass(nil) }
+
+// syncPass is one pass of sync. tried holds the notifications whose banner
+// already failed to be created earlier in the same sync, which the pass
+// that follows a closure must not try again: every attempt counts toward
+// closing the notification, and one change to the queue is meant to cost
+// one attempt, not two.
+func (d *daemon) syncPass(tried map[uint32]bool) {
 	shown := d.q.Shown()
 	live := make(map[uint32]bool, len(shown))
 	top := d.area.Min.Y + d.th.marginT
 	restX := d.area.Max.X - d.th.marginR - d.th.width - d.th.winPadX
+	var broken []uint32
 
 	for i := range shown {
 		s := &shown[i]
@@ -77,14 +122,33 @@ func (d *daemon) sync() {
 		b := d.banners[s.ID]
 		switch {
 		case b == nil:
-			created, err := d.newBanner(s, restX, top)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "notifyd:", err)
+			if tried[s.ID] {
 				continue
 			}
+			created, err := d.newBanner(s, restX, top)
+			if err != nil {
+				if tried == nil {
+					tried = make(map[uint32]bool)
+				}
+				tried[s.ID] = true
+				if d.failed.fail(s.ID) {
+					log.Printf("%v; closing notification %d after %d attempts", err, s.ID, maxAttempts)
+					broken = append(broken, s.ID)
+				} else {
+					// Retried at the next change to the queue, which may be
+					// the next event; limited per notification for that.
+					d.lim.Printf(fmt.Sprintf("banner:%d", s.ID), "%v", err)
+				}
+				continue
+			}
+			delete(d.failed, s.ID)
 			b = created
 		case b.rev != s.Rev:
-			d.update(b, s)
+			if err := d.update(b, s); err != nil {
+				log.Printf("%v; closing notification %d", err, s.ID)
+				broken = append(broken, s.ID)
+				continue
+			}
 		}
 		if b.restX != restX {
 			b.restX = restX
@@ -93,10 +157,23 @@ func (d *daemon) sync() {
 		b.y.Target = float64(top - d.th.winPadY)
 		top += b.lay.plate.Dy() + d.th.gap
 	}
+	d.failed.keep(live)
 	for id, b := range d.banners {
 		if !live[id] && !b.closing {
 			d.startClose(b)
 		}
+	}
+
+	if len(broken) > 0 {
+		now := time.Now()
+		for _, id := range broken {
+			d.emitClosed(d.q.Close(id, notify.ReasonUndefined, now))
+		}
+		// Closing made room for whatever was waiting. This goes no deeper:
+		// what comes on screen now has no banner to fail redrawing, and
+		// one failure to create is not enough to be closed -- the more so
+		// as whatever already failed in this sync is not tried again.
+		d.syncPass(tried)
 	}
 }
 
@@ -114,12 +191,15 @@ func (d *daemon) newBanner(s *notify.Shown, restX, plateTop int) (*banner, error
 
 	win, err := d.createWindow(b.curX, b.curY, b.lay.size.X, b.lay.size.Y)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("banner %d: %w", b.id, err)
 	}
 	b.win = win
 	b.surf, err = xsurface.New(d.conn, win, d.visual.depth, b.lay.size.X, b.lay.size.Y)
 	if err != nil {
-		xproto.DestroyWindow(d.conn, win)
+		err = fmt.Errorf("banner %d surface: %w", b.id, err)
+		if destroyErr := xproto.DestroyWindowChecked(d.conn, win).Check(); destroyErr != nil {
+			err = errors.Join(err, fmt.Errorf("destroying banner %d window: %w", b.id, destroyErr))
+		}
 		return nil, err
 	}
 	d.banners[b.id] = b
@@ -128,35 +208,53 @@ func (d *daemon) newBanner(s *notify.Shown, restX, plateTop int) (*banner, error
 	// Drawn before mapping, so the first Expose has a finished frame to
 	// copy rather than an empty window to show.
 	d.render(b)
-	xproto.MapWindow(d.conn, win)
+	if mapErr := xproto.MapWindowChecked(d.conn, win).Check(); mapErr != nil {
+		err = fmt.Errorf("showing banner %d: %w", b.id, mapErr)
+		return nil, errors.Join(err, d.destroy(b))
+	}
 	d.raise(win)
 	return b, nil
 }
 
 // update redraws a banner whose notification was replaced.
-func (d *daemon) update(b *banner, s *notify.Shown) {
+//
+// When the banner cannot take its new size it is destroyed, and the error
+// says so: drawing the new layout onto a surface of the old size would put
+// it past the surface's edges, and the caller closes the notification.
+func (d *daemon) update(b *banner, s *notify.Shown) error {
 	b.rev, b.n = s.Rev, s.Notification
 	b.icon = d.iconFor(&b.n)
 	old := b.lay.size
 	b.lay = measure(d.th, d.faces, &b.n)
 	if b.lay.size != old {
 		if err := d.resize(b); err != nil {
-			fmt.Fprintln(os.Stderr, "notifyd:", err)
-			return
+			return errors.Join(err, d.destroy(b))
 		}
 	}
 	d.render(b)
+	return nil
 }
 
 // resize fits a banner's window and surface to a new layout.
+//
+// The new surface is made before the old one is freed, so that on failure
+// the banner still holds a surface that exists -- one freed first would
+// leave every later frame and Expose drawing to a pixmap that is gone.
 func (d *daemon) resize(b *banner) error {
-	b.surf.Close()
-	d.resizeWindow(b.win, b.lay.size.X, b.lay.size.Y)
+	if err := d.resizeWindow(b.win, b.lay.size.X, b.lay.size.Y); err != nil {
+		return fmt.Errorf("resizing banner %d: %w", b.id, err)
+	}
 	surf, err := xsurface.New(d.conn, b.win, d.visual.depth, b.lay.size.X, b.lay.size.Y)
 	if err != nil {
-		return err
+		return fmt.Errorf("resizing banner %d: %w", b.id, err)
 	}
+	old := b.surf
 	b.surf = surf
+	if closeErr := old.Close(); closeErr != nil {
+		// The banner has what it needs; at worst the old pixmap stays
+		// allocated until the connection closes.
+		log.Printf("banner %d: freeing the surface it outgrew: %v", b.id, closeErr)
+	}
 	return nil
 }
 
@@ -175,13 +273,24 @@ func (d *daemon) startClose(b *banner) {
 	}
 }
 
-func (d *daemon) destroy(b *banner) {
-	if b.surf != nil {
-		b.surf.Close()
-	}
-	xproto.DestroyWindow(d.conn, b.win)
+// destroy takes a banner off the screen and frees what it holds on the
+// server. The banner is forgotten whatever the result: an error means the
+// server had already lost track of the window or the surface, and there is
+// nothing left worth retrying.
+func (d *daemon) destroy(b *banner) error {
 	delete(d.banners, b.id)
 	delete(d.byWin, b.win)
+	var errs []error
+	if b.surf != nil {
+		if err := b.surf.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("banner %d surface: %w", b.id, err))
+		}
+		b.surf = nil
+	}
+	if err := xproto.DestroyWindowChecked(d.conn, b.win).Check(); err != nil {
+		errs = append(errs, fmt.Errorf("destroying banner %d: %w", b.id, err))
+	}
+	return errors.Join(errs...)
 }
 
 // step advances every animation by one frame.
@@ -198,7 +307,10 @@ func (d *daemon) step(now time.Time) {
 			continue
 		}
 		if b.fade.Done() {
-			d.destroy(b) // deleting during range is allowed
+			// Deleting during range is allowed.
+			if err := d.destroy(b); err != nil {
+				d.lim.Printf("destroy", "%v", err)
+			}
 			continue
 		}
 		if b.fade.Step(dt) {
@@ -237,7 +349,9 @@ func (d *daemon) present(b *banner) {
 
 func (d *daemon) flush(b *banner) {
 	if err := b.surf.Flush(); err != nil {
-		d.logf("drawing banner %d: %v", b.id, err)
+		// Every frame of a fade comes through here, so a failure that sticks
+		// would otherwise be logged at frame rate.
+		d.lim.Printf("flush", "drawing banner %d: %v", b.id, err)
 	}
 }
 
@@ -247,7 +361,7 @@ func (d *daemon) handle(ev xgb.Event) {
 	case xproto.ExposeEvent:
 		if b := d.byWin[e.Window]; b != nil && e.Count == 0 {
 			if err := b.surf.Copy(); err != nil {
-				d.logf("%v", err)
+				d.lim.Printf("copy", "repainting banner %d: %v", b.id, err)
 			}
 		}
 
@@ -285,13 +399,20 @@ func (d *daemon) handle(ev xgb.Event) {
 		// banners overlap each other while they slide, and raising one
 		// over another would cover that one, which would raise itself, and
 		// so on for as long as they overlapped.
-		if b := d.byWin[e.Window]; b != nil && e.State != xproto.VisibilityUnobscured && d.coveredByOther(b) {
-			d.raise(b.win)
+		if b := d.byWin[e.Window]; b != nil && e.State != xproto.VisibilityUnobscured {
+			covered, err := d.coveredByOther(b)
+			if err != nil {
+				// The answer it gives is still the best available.
+				d.lim.Printf("covered", "checking what covers banner %d: %v", b.id, err)
+			}
+			if covered {
+				d.raise(b.win)
+			}
 		}
 
 	case xproto.PropertyNotifyEvent:
 		if e.Window == d.screen.Root && e.Atom == d.atoms.workarea {
-			d.area = d.workArea()
+			d.updateWorkArea()
 			d.sync()
 		}
 	}
@@ -349,15 +470,19 @@ func (d *daemon) click(b *banner, e xproto.ButtonPressEvent) {
 // the user was interacting with the desktop.
 func (d *daemon) invoke(b *banner, key string, t xproto.Timestamp, now time.Time) {
 	ok, closed := d.q.Invoke(b.id, key, now)
-	if ok {
-		d.logf("action %q on %d", key, b.id)
-		token := fmt.Sprintf("osxflow-notifyd-%d_TIME%d", b.id, t)
-		if err := d.srv.EmitActivationToken(b.id, token); err != nil {
-			d.logf("%v", err)
-		}
-		if err := d.srv.EmitAction(b.id, key); err != nil {
-			d.logf("%v", err)
-		}
+	if !ok {
+		// The banner showed the action, but a replacement since has taken
+		// it away; the click does nothing.
+		d.debugf("action %q on %d is no longer offered", key, b.id)
+		return
+	}
+	d.debugf("action %q on %d", key, b.id)
+	token := fmt.Sprintf("osxflow-notifyd-%d_TIME%d", b.id, t)
+	if err := d.srv.EmitActivationToken(b.id, token); err != nil {
+		d.lim.Printf("emit", "action %q on %d: %v", key, b.id, err)
+	}
+	if err := d.srv.EmitAction(b.id, key); err != nil {
+		d.lim.Printf("emit", "action %q on %d: %v", key, b.id, err)
 	}
 	d.emitClosed(closed)
 }
@@ -384,10 +509,16 @@ func (d *daemon) iconFor(n *notify.Notification) *image.RGBA {
 	}
 	if n.Icon.Path != "" {
 		img, err := notify.LoadImageFile(n.Icon.Path)
-		if err == nil {
+		switch {
+		case err == nil:
 			return fit(img, size)
+		case iconFallbackExpected(err):
+			d.debugf("icon: %v", err)
+		default:
+			// Limited per path: a replaced notification loads it again each
+			// time, and a volume popup is replaced once per keypress.
+			d.lim.Printf("icon:"+n.Icon.Path, "icon: %v", err)
 		}
-		d.logf("icon: %v", err)
 	}
 	if key := d.index.Lookup(n); key != "" {
 		if img := d.set.At(key, size); img != nil {
@@ -395,6 +526,14 @@ func (d *daemon) iconFor(n *notify.Notification) *image.RGBA {
 		}
 	}
 	return d.fallback(n.Title(), size)
+}
+
+// iconFallbackExpected reports whether an image file failed to load for one
+// of the everyday reasons -- it is not there, or it is an SVG, which is
+// what most icon themes are made of -- after which falling back to another
+// icon is simply the plan.
+func iconFallbackExpected(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, image.ErrFormat)
 }
 
 // maxFallbacks bounds the placeholder cache. Every distinct sender name

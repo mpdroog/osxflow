@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"unicode"
@@ -117,7 +118,20 @@ func entityAt(s string) (r rune, n int) {
 		digits, base = digits[1:], 16
 	}
 	v, err := strconv.ParseUint(digits, base, 32)
-	if err != nil || v == 0 || v > unicode.MaxRune {
+	switch {
+	case errors.Is(err, strconv.ErrSyntax), errors.Is(err, strconv.ErrRange):
+		// "&#;", "&#xzz;", "&#99999999999;": text that only looks like a
+		// reference. That is not an error in the body -- "a & b" is not
+		// one either -- and it stays exactly as written.
+		return 0, 0
+	case err != nil:
+		// Those two are all ParseUint reports for a valid base and bit
+		// size, and both are fixed above. Should that ever change, the
+		// text still stays as written: a notification body is no place to
+		// fail over.
+		return 0, 0
+	case v == 0 || v > unicode.MaxRune:
+		// NUL and numbers beyond Unicode are not characters.
 		return 0, 0
 	}
 	r = rune(v)

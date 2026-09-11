@@ -8,10 +8,11 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
-	"os"
 	"strings"
 	"time"
 
@@ -25,6 +26,11 @@ import (
 )
 
 func main() {
+	// First, so that everything below -- including what the shared
+	// packages log -- says which tool it came from.
+	log.SetPrefix("launcher: ")
+	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
+
 	var (
 		list    = flag.Bool("list", false, "list the applications that were found and exit")
 		windows = flag.Bool("windows", false, "list the open windows as the matcher sees them and exit")
@@ -39,8 +45,7 @@ func main() {
 	flag.Parse()
 
 	if err := run(*list, *windows, *match, *open, *eval, *query, *scale, *noLearn, *forget); err != nil {
-		fmt.Fprintln(os.Stderr, "launcher:", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 }
 
@@ -59,7 +64,7 @@ func run(list, windows, match bool, open, eval, query string, scale float64, noL
 	// habits is worse than one that has forgotten them.
 	store, storeErr := loadStore()
 	if storeErr != nil {
-		fmt.Fprintln(os.Stderr, "launcher:", storeErr)
+		log.Printf("usage memory: %v", storeErr)
 	}
 	now := time.Now()
 	ranker := store.At(now)
@@ -75,10 +80,13 @@ func run(list, windows, match bool, open, eval, query string, scale float64, noL
 
 	apps, problems := desktop.Scan()
 	for _, p := range problems {
-		fmt.Fprintln(os.Stderr, "launcher: skipped an entry:", p)
+		log.Printf("application list: %v", p)
 	}
 	if len(apps) == 0 {
-		return fmt.Errorf("no applications found in %v", desktop.DataDirs())
+		// The directory error, if any, was among the problems above; it is
+		// repeated here because it may well be the reason for this one.
+		dirs, dirsErr := desktop.DataDirs()
+		return errors.Join(fmt.Errorf("no applications found in %v", dirs), dirsErr)
 	}
 
 	if list {
@@ -94,7 +102,13 @@ func run(list, windows, match bool, open, eval, query string, scale float64, noL
 	if err != nil {
 		return err
 	}
-	defer server.Close() //nolint:errcheck // exiting anyway
+	// Logged rather than joined into the result: whatever the launcher did
+	// is done by now, and a failure to hang up does not undo it.
+	defer func() {
+		if err := server.Close(); err != nil {
+			log.Printf("closing the X connection: %v", err)
+		}
+	}()
 
 	switch {
 	case windows:
@@ -111,7 +125,7 @@ func run(list, windows, match bool, open, eval, query string, scale float64, noL
 	return ui.Run(apps, func(app *desktop.App, chosenFor string) error {
 		res, err := l.Open(app)
 		if err != nil {
-			return err
+			return err // ui shows it and logs it; see ui.OpenFunc
 		}
 		if res.Focused {
 			log.Printf("focused 0x%x of %s (matched by %s)", res.Window.ID, app.Name, res.Confidence)
@@ -181,12 +195,28 @@ func printWindows(server xwin.Server) error {
 	for _, w := range wins {
 		exe, err := launch.ProcExe(w.PID)
 		if err != nil {
-			exe = "(" + err.Error() + ")"
+			exe = "(" + exeProblem(err) + ")"
 		}
 		fmt.Printf("0x%-9x pid=%-7d %-34s %s\n", w.ID, w.PID, w.Instance+"."+w.Class, exe)
 	}
 	fmt.Printf("\n%d windows (bottom to top)\n", len(wins))
 	return nil
+}
+
+// exeProblem says why a window has no executable, in the table's terms.
+// The three expected reasons are the ones the matcher treats as absence
+// rather than failure, and they read as such; anything else is shown in
+// full, because that is the row this table exists to find.
+func exeProblem(err error) string {
+	switch {
+	case errors.Is(err, launch.ErrNoPID):
+		return "no pid"
+	case errors.Is(err, fs.ErrNotExist):
+		return "process has exited"
+	case errors.Is(err, fs.ErrPermission):
+		return "another user's process"
+	}
+	return err.Error()
 }
 
 // printMatches is the check that matters: every window that belongs to a
@@ -197,11 +227,14 @@ func printMatches(apps []desktop.App, server xwin.Server) error {
 		return err
 	}
 
+	// One /proc read per window rather than one per window per app, and
+	// one report of a failing read rather than one per app.
+	exe := launch.CachedExe(launch.ProcExe)
 	matched := 0
 	for _, w := range wins {
 		name, conf := "-", launch.None
 		for i := range apps {
-			if _, c := launch.Match(&apps[i], []xwin.Window{w}, launch.ProcExe); c > conf {
+			if _, c := launch.Match(&apps[i], []xwin.Window{w}, exe); c > conf {
 				name, conf = apps[i].Name, c
 			}
 		}

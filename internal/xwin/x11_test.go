@@ -17,7 +17,11 @@ func TestX11Integration(t *testing.T) {
 	if err != nil {
 		t.Skipf("cannot connect to X: %v", err)
 	}
-	defer server.Close() //nolint:errcheck // test cleanup
+	t.Cleanup(func() {
+		if closeErr := server.Close(); closeErr != nil {
+			t.Errorf("Close: %v", closeErr)
+		}
+	})
 
 	wins, err := server.Windows()
 	if err != nil {

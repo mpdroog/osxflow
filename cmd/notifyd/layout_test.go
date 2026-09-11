@@ -16,7 +16,11 @@ func testFaces(t *testing.T, th *theme) *faces {
 	if err != nil {
 		t.Skipf("no usable system font: %v", err)
 	}
-	t.Cleanup(f.close)
+	t.Cleanup(func() {
+		if closeErr := f.close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+	})
 	return f
 }
 

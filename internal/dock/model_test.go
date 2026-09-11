@@ -1,6 +1,7 @@
 package dock
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/mpdroog/osxflow/internal/desktop"
@@ -30,7 +31,7 @@ func testApps() []desktop.App {
 func noTrash(t *testing.T) {
 	t.Helper()
 	prev := trashCounter
-	trashCounter = func(string) int { return 0 }
+	trashCounter = func(string) (int, error) { return 0, nil }
 	t.Cleanup(func() { trashCounter = prev })
 }
 
@@ -171,16 +172,44 @@ func TestBuildTrashIconReflectsContents(t *testing.T) {
 
 	b := testBuilder(t, nil, testApps())
 
-	trashCounter = func(string) int { return 0 }
+	trashCounter = func(string) (int, error) { return 0, nil }
 	items, _ := b.Build(nil)
 	if got := items[len(items)-1].Icon; got != icons.Trash {
 		t.Errorf("empty trash icon = %q, want %q", got, icons.Trash)
 	}
 
-	trashCounter = func(string) int { return 3 }
+	trashCounter = func(string) (int, error) { return 3, nil }
 	items, _ = b.Build(nil)
 	if got := items[len(items)-1].Icon; got != icons.TrashFull {
 		t.Errorf("full trash icon = %q, want %q", got, icons.TrashFull)
+	}
+}
+
+// TestBuildWarnsWhenTrashCannotBeCounted: the row is still built, with the
+// empty icon, but the failure reaches the caller instead of passing for an
+// empty trash.
+func TestBuildWarnsWhenTrashCannotBeCounted(t *testing.T) {
+	prev := trashCounter
+	t.Cleanup(func() { trashCounter = prev })
+	boom := errors.New("permission denied")
+	trashCounter = func(string) (int, error) { return 0, boom }
+
+	var warned []error
+	b := testBuilder(t, nil, testApps())
+	b.Warn = func(err error) { warned = append(warned, err) }
+	items, _ := b.Build(nil)
+
+	if got := items[len(items)-1].Icon; got != icons.Trash {
+		t.Errorf("trash icon = %q, want the empty one when it cannot be counted", got)
+	}
+	if len(warned) != 1 || !errors.Is(warned[0], boom) {
+		t.Errorf("warnings = %v, want the counting error once", warned)
+	}
+}
+
+func TestNoTrashDirIsReported(t *testing.T) {
+	if _, err := defaultTrashCount(""); !errors.Is(err, errNoTrashDir) {
+		t.Errorf("defaultTrashCount(\"\") error = %v, want errNoTrashDir", err)
 	}
 }
 

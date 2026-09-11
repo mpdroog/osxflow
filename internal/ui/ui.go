@@ -10,6 +10,7 @@ package ui
 import (
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/jezek/xgb"
@@ -18,6 +19,7 @@ import (
 	"github.com/jezek/xgbutil/keybind"
 
 	"github.com/mpdroog/osxflow/internal/desktop"
+	"github.com/mpdroog/osxflow/internal/errlog"
 	"github.com/mpdroog/osxflow/internal/search"
 )
 
@@ -26,19 +28,32 @@ import (
 //
 // Returning an error keeps the window open and shows the message, on the
 // theory that a launcher which vanishes after failing to launch something
-// is indistinct from one that worked.
+// is indistinct from one that worked. The error is also logged, here, so
+// the OpenFunc should return it rather than log it itself.
 type OpenFunc func(app *desktop.App, query string) error
 
 // Run shows the launcher. scaleOverride forces a display scale; pass 0 to
 // detect one. ranker may be nil.
-func Run(apps []desktop.App, onOpen OpenFunc, scaleOverride float64, ranker search.Ranker) error {
+func Run(apps []desktop.App, onOpen OpenFunc, scaleOverride float64, ranker search.Ranker) (err error) {
 	u, err := newUI(apps, onOpen, scaleOverride, ranker)
 	if err != nil {
 		return err
 	}
-	defer u.close()
+	defer func() {
+		if cerr := u.close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("closing the window: %w", cerr))
+		}
+	}()
 	return u.loop()
 }
+
+// xErrLog reports X errors that arrive in the event loop. It is keyed by
+// error type, so a request that fails on every keystroke is one line a
+// minute, and a second kind of failure still gets through.
+var xErrLog = &errlog.Limiter{Burst: 3, Per: time.Minute}
+
+// errConnClosed ends the event loop when the server goes away.
+var errConnClosed = errors.New("the connection to the X server closed")
 
 type ui struct {
 	X     *xgbutil.XUtil
@@ -61,6 +76,11 @@ type ui struct {
 	// pointerGrabbed records whether click-to-dismiss is available, so
 	// close does not ungrab something it never held.
 	pointerGrabbed bool
+
+	// connClosed is set when the server has gone. close then sends it
+	// nothing: every request would fail, and the server has already freed
+	// everything this client held.
+	connClosed bool
 }
 
 func newUI(apps []desktop.App, onOpen OpenFunc, scaleOverride float64, ranker search.Ranker) (*ui, error) {
@@ -70,7 +90,14 @@ func newUI(apps []desktop.App, onOpen OpenFunc, scaleOverride float64, ranker se
 	}
 	keybind.Initialize(X)
 
-	mt := newMetrics(DetectScale(X, scaleOverride))
+	// The factor is always usable (1 when nothing answers); the error says
+	// why it may not match the desktop, which is worth a line but not a
+	// failed start.
+	factor, scaleErr := DetectScale(X, scaleOverride)
+	if scaleErr != nil {
+		log.Printf("scale: %v", scaleErr)
+	}
+	mt := newMetrics(factor)
 
 	faces, err := loadFaces(mt)
 	if err != nil {
@@ -87,9 +114,12 @@ func newUI(apps []desktop.App, onOpen OpenFunc, scaleOverride float64, ranker se
 		open:  onOpen,
 	}
 	if err := u.createWindow(); err != nil {
-		faces.close()
+		// Whatever part of the window was created goes with the
+		// connection: the server frees a client's resources when it
+		// disconnects.
+		closeErr := faces.close()
 		X.Conn().Close()
-		return nil, err
+		return nil, errors.Join(err, closeErr)
 	}
 	return u, nil
 }
@@ -127,7 +157,9 @@ func (u *ui) createWindow() error {
 	// Even an override-redirect window should say what it is: it shows up
 	// in xwininfo and in screen recordings, and an unnamed one is a
 	// nuisance to anybody debugging their desktop.
-	u.setName()
+	if nameErr := u.setName(); nameErr != nil {
+		return nameErr
+	}
 
 	u.surf, err = newSurface(u.conn, win, screen.RootDepth, u.mt.windowWidth, u.mt.windowHeight)
 	if err != nil {
@@ -135,7 +167,9 @@ func (u *ui) createWindow() error {
 	}
 	u.height = u.mt.windowHeight
 
-	xproto.MapWindow(u.conn, win)
+	if err := xproto.MapWindowChecked(u.conn, win).Check(); err != nil {
+		return fmt.Errorf("mapping the window: %w", err)
+	}
 	if err := u.grabKeyboard(); err != nil {
 		return err
 	}
@@ -143,13 +177,18 @@ func (u *ui) createWindow() error {
 	return nil
 }
 
-func (u *ui) setName() {
+func (u *ui) setName() error {
 	const name = "osxflow"
 	wmClass := append([]byte("osxflow\x00"), []byte("Osxflow\x00")...)
-	xproto.ChangeProperty(u.conn, xproto.PropModeReplace, u.win,
-		xproto.AtomWmName, xproto.AtomString, 8, u32(len(name)), []byte(name))
-	xproto.ChangeProperty(u.conn, xproto.PropModeReplace, u.win,
-		xproto.AtomWmClass, xproto.AtomString, 8, u32(len(wmClass)), wmClass)
+	if err := xproto.ChangePropertyChecked(u.conn, xproto.PropModeReplace, u.win,
+		xproto.AtomWmName, xproto.AtomString, 8, u32(len(name)), []byte(name)).Check(); err != nil {
+		return fmt.Errorf("setting WM_NAME: %w", err)
+	}
+	if err := xproto.ChangePropertyChecked(u.conn, xproto.PropModeReplace, u.win,
+		xproto.AtomWmClass, xproto.AtomString, 8, u32(len(wmClass)), wmClass).Check(); err != nil {
+		return fmt.Errorf("setting WM_CLASS: %w", err)
+	}
+	return nil
 }
 
 // grabKeyboard takes exclusive keyboard input.
@@ -169,6 +208,10 @@ func (u *ui) grabKeyboard() error {
 		if err != nil {
 			return fmt.Errorf("grabbing the keyboard: %w", err)
 		}
+		if reply == nil {
+			// xgb's answer when the connection closed before the reply came.
+			return fmt.Errorf("grabbing the keyboard: %w", errConnClosed)
+		}
 		if reply.Status == xproto.GrabStatusSuccess {
 			return nil
 		}
@@ -183,10 +226,11 @@ func (u *ui) grabKeyboard() error {
 // grabPointer takes pointer input so that a click anywhere -- including
 // outside this window -- is delivered here and can dismiss the launcher.
 //
-// Failure is not fatal and is deliberately silent. Losing the pointer grab
-// costs click-to-dismiss; the keyboard still works and Escape still closes
-// the window, so refusing to start over it would trade a whole launcher
-// for a convenience.
+// Failure is not fatal, and is logged rather than returned. Losing the
+// pointer grab costs click-to-dismiss; the keyboard still works and Escape
+// still closes the window, so refusing to start over it would trade a
+// whole launcher for a convenience. It runs once per launcher, so it logs
+// at most once.
 //
 // owner_events is false, which is what makes clicks outside the window
 // arrive at all: with it true they would go to whichever window is under
@@ -196,7 +240,16 @@ func (u *ui) grabPointer() {
 		uint16(xproto.EventMaskButtonPress),
 		xproto.GrabModeAsync, xproto.GrabModeAsync,
 		xproto.WindowNone, xproto.CursorNone, xproto.TimeCurrentTime).Reply()
-	u.pointerGrabbed = err == nil && reply != nil && reply.Status == xproto.GrabStatusSuccess
+	switch {
+	case err != nil:
+		log.Printf("click-to-dismiss unavailable: grabbing the pointer: %v", err)
+	case reply == nil:
+		log.Printf("click-to-dismiss unavailable: grabbing the pointer: %v", errConnClosed)
+	case reply.Status != xproto.GrabStatusSuccess:
+		log.Printf("click-to-dismiss unavailable: something else holds the pointer (grab status %d)", reply.Status)
+	default:
+		u.pointerGrabbed = true
+	}
 }
 
 // errDismissed is the ordinary way out, and is not reported to the user.
@@ -210,13 +263,18 @@ func (u *ui) loop() error {
 		ev, xerr := u.conn.WaitForEvent()
 		if xerr != nil {
 			// A protocol error here is not fatal: it refers to a request
-			// that already failed, and the loop can carry on.
+			// that already failed, and the loop can carry on. Every request
+			// this file sends is checked where it is sent, so one arriving
+			// here is a surprise, and is logged.
+			xErrLog.Printf(fmt.Sprintf("%T", xerr), "X error: %v", xerr)
 			continue
 		}
 		if ev == nil {
 			// The connection closed under us -- the X server went away, or
-			// the session ended.
-			return nil
+			// the session ended. That is not a dismissal: the launcher did
+			// not do what it was opened for, so it is an error.
+			u.connClosed = true
+			return errConnClosed
 		}
 
 		switch e := ev.(type) {
@@ -344,9 +402,12 @@ func (u *ui) accept() (done bool, err error) {
 	if err := u.open(app, u.model.Query()); err != nil {
 		// Deliberately not propagated: a launcher that vanishes after
 		// failing to start something is indistinguishable from one that
-		// worked. The message is shown and the window stays open.
+		// worked. The message is shown and the window stays open. It is
+		// logged here too -- this is the one place that does, see
+		// OpenFunc -- so it outlives the window.
+		log.Print(err)
 		u.status = err.Error()
-		return false, nil //nolint:nilerr // reported to the user, not the caller
+		return false, nil
 	}
 	return true, nil
 }
@@ -358,8 +419,14 @@ func (u *ui) repaint() error {
 	}
 	height := u.mt.heightFor(rows)
 	if height != u.height {
-		xproto.ConfigureWindow(u.conn, u.win,
-			xproto.ConfigWindowHeight, []uint32{u32(height)})
+		// Checked, so a round trip on the keystrokes that change the
+		// number of rows. That is imperceptible, and an unchecked resize
+		// that failed would leave rows drawn below the window's edge with
+		// nothing said.
+		if err := xproto.ConfigureWindowChecked(u.conn, u.win,
+			xproto.ConfigWindowHeight, []uint32{u32(height)}).Check(); err != nil {
+			return fmt.Errorf("resizing the window to %dpx: %w", height, err)
+		}
 		u.height = height
 	}
 
@@ -370,19 +437,41 @@ func (u *ui) repaint() error {
 	return u.surf.flush(height)
 }
 
-func (u *ui) close() {
-	xproto.UngrabKeyboard(u.conn, xproto.TimeCurrentTime)
-	if u.pointerGrabbed {
-		xproto.UngrabPointer(u.conn, xproto.TimeCurrentTime)
-	}
-	if u.surf != nil {
-		u.surf.close()
-	}
-	if u.win != 0 {
-		xproto.DestroyWindow(u.conn, u.win)
+// close releases the grabs and the window, then disconnects.
+//
+// The server would do all of this itself on disconnect, which follows
+// immediately. The requests are sent anyway so the grabs are gone the
+// moment the launcher is done rather than whenever the process gets round
+// to exiting, and they are checked because a request sent unchecked right
+// before Close can never report anything: its error would arrive on a
+// connection nobody reads any more.
+func (u *ui) close() error {
+	var errs []error
+	if !u.connClosed {
+		if err := xproto.UngrabKeyboardChecked(u.conn, xproto.TimeCurrentTime).Check(); err != nil {
+			errs = append(errs, fmt.Errorf("releasing the keyboard: %w", err))
+		}
+		if u.pointerGrabbed {
+			if err := xproto.UngrabPointerChecked(u.conn, xproto.TimeCurrentTime).Check(); err != nil {
+				errs = append(errs, fmt.Errorf("releasing the pointer: %w", err))
+			}
+		}
+		if u.surf != nil {
+			if err := u.surf.close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if u.win != 0 {
+			if err := xproto.DestroyWindowChecked(u.conn, u.win).Check(); err != nil {
+				errs = append(errs, fmt.Errorf("destroying the window: %w", err))
+			}
+		}
 	}
 	if u.faces != nil {
-		u.faces.close()
+		if err := u.faces.close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	u.conn.Close()
+	return errors.Join(errs...)
 }

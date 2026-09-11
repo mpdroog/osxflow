@@ -10,6 +10,7 @@ package calc
 import (
 	"fmt"
 	"math"
+	"math/big"
 	"strconv"
 )
 
@@ -105,10 +106,7 @@ func Format(v float64) string {
 	// the shortest representation that round-trips *that* value. Doing it
 	// in two steps is what turns 0.30000000000000004 into "0.3" without
 	// also turning 1234567890123 into "1.23456789012e+12".
-	rounded, err := strconv.ParseFloat(strconv.FormatFloat(v, 'g', displayPrecision, 64), 64)
-	if err != nil {
-		rounded = v
-	}
+	rounded := roundSignificant(v)
 	if rounded == math.Trunc(rounded) && math.Abs(rounded) < 1e15 {
 		return strconv.FormatFloat(rounded, 'f', -1, 64)
 	}
@@ -118,4 +116,75 @@ func Format(v float64) string {
 		return strconv.FormatFloat(rounded, 'f', -1, 64)
 	}
 	return strconv.FormatFloat(rounded, 'g', -1, 64)
+}
+
+// roundSignificant rounds v to the float64 nearest to v written with
+// displayPrecision significant decimal digits.
+//
+// This is what printing v with FormatFloat(v, 'g', displayPrecision) and
+// parsing the text back gives, computed without the text. The round trip was the
+// obvious way to write it, but it makes ParseFloat part of formatting, and
+// ParseFloat has an error that here could only ever be ignored. The
+// arithmetic is exact rational arithmetic, not float: v*10^k in floating
+// point is itself rounded, which lands a value near a tie on the wrong side
+// of it and prints 0.30000000000000004 again. Two things make it agree
+// with strconv exactly: ties go to the even digit, as strconv's fixed-
+// precision formatting does, and the final conversion is correctly
+// rounded, as ParseFloat's is. The test holds it to that.
+//
+// Format calls this once per keystroke on one number; big.Rat is plenty
+// fast for that.
+func roundSignificant(v float64) float64 {
+	if v == 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return v
+	}
+	x := new(big.Rat).SetFloat64(math.Abs(v)) // exact: every float64 is a fraction
+
+	// The decimal exponent of the leading digit. Log10 gets it right or
+	// one off either way near a power of ten; the exact comparisons fix
+	// the estimate rather than trust it.
+	exp := int(math.Floor(math.Log10(math.Abs(v))))
+	for x.Cmp(pow10(exp)) < 0 {
+		exp--
+	}
+	for x.Cmp(pow10(exp+1)) >= 0 {
+		exp++
+	}
+
+	// Scale so the digits to keep are the integer part, round that to an
+	// integer with ties to even, and scale back.
+	shift := displayPrecision - 1 - exp
+	scaled := new(big.Rat).Mul(x, pow10(shift))
+	q, r := new(big.Int).QuoRem(scaled.Num(), scaled.Denom(), new(big.Int))
+	switch c := r.Lsh(r, 1).Cmp(scaled.Denom()); {
+	case c > 0, c == 0 && q.Bit(0) == 1:
+		q.Add(q, big.NewInt(1))
+	}
+	out := new(big.Rat).Mul(new(big.Rat).SetInt(q), pow10(-shift))
+
+	// The exactness flag is not a failure: the result is a decimal that
+	// usually has no exact binary form, and nearest is what was asked for.
+	// Overflow cannot happen either: rounding to 12 digits can only carry
+	// past MaxFloat64 from a value that is already above it.
+	f, _ := out.Float64()
+	if v < 0 {
+		return -f
+	}
+	return f
+}
+
+// pow10 is 10^n as an exact rational, for negative n too.
+func pow10(n int) *big.Rat {
+	p := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(abs(n))), nil)
+	if n < 0 {
+		return new(big.Rat).SetFrac(big.NewInt(1), p)
+	}
+	return new(big.Rat).SetInt(p)
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }

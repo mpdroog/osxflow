@@ -32,8 +32,13 @@ linters:
     - bodyclose       # unclosed HTTP response bodies
     - noctx           # HTTP requests without context
     - nosprintfhostport
+    - nolintlint      # every //nolint names its linter and says why
 
   settings:
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
     gocritic:
       enabled-tags:
         - diagnostic

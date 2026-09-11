@@ -89,7 +89,11 @@ first, from `/etc/xdg/autostart/` or `/usr/share/applications/`.
 **4. Switch over now**, without logging out:
 
     pkill -x plank
-    ~/.local/bin/dock &
+    setsid -f sh -c 'exec ~/.local/bin/dock >>"$HOME/.xsession-errors" 2>&1 </dev/null'
+
+Not `~/.local/bin/dock &`. Started from a terminal, the dock writes its
+errors into that terminal and dies with it; started like this, it logs
+where the autostarted one will from the next login on.
 
 To go back, restore `plank.desktop.bak`, delete `dock.desktop`, and log out
 and back in.
@@ -100,6 +104,14 @@ and back in.
 matched it to and why, and the item list it would build. That answers the
 question this design actually raises in practice: why is something showing
 up in the dock, or not?
+
+Errors are always logged to stderr, which for the autostarted dock is
+`~/.xsession-errors`; every line starts with `dock:`. That covers X errors,
+a window list that could not be read, a folder a stack could not list, and
+the X connection going away -- which ends the dock with an exit status of 1
+rather than silently. Those that can repeat -- per frame, per window-list
+change -- are limited to a few lines a minute each, and the lines held back
+are counted. `dock -v` adds what the dock does on a click.
 
 ## Requirements
 

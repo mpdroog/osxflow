@@ -22,6 +22,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -62,11 +63,19 @@ func run(size int, outDir string, verbose bool) error {
 		return fmt.Errorf("%s is required to rasterise the icon theme: %w", thumbnailer, err)
 	}
 
-	index, err := buildIndex(themeChain())
+	dirs, err := themeChain()
 	if err != nil {
 		return err
 	}
-	fmt.Printf("indexed %d icon names across the theme chain\n", len(index))
+	ix, err := buildIndex(dirs, func(err error) {
+		fmt.Fprintln(os.Stderr, "warning:", err)
+	})
+	if err != nil {
+		return err
+	}
+	index := ix.index
+	fmt.Printf("indexed %d icon names across the theme chain (%d dangling links skipped)\n",
+		len(index), ix.dangling)
 
 	if err := os.MkdirAll(outDir, 0o750); err != nil {
 		return fmt.Errorf("creating %s: %w", outDir, err)
@@ -100,12 +109,17 @@ func run(size int, outDir string, verbose bool) error {
 
 	var written, missing, failed int
 	for _, key := range keys {
-		src, ok := resolve(wanted[key], index)
-		if !ok {
+		src, err := resolve(wanted[key], index)
+		if errors.Is(err, errNoIcon) {
 			missing++
 			if verbose {
 				fmt.Printf("  no icon file for %-40s (Icon=%s)\n", key, wanted[key])
 			}
+			continue
+		}
+		if err != nil {
+			failed++
+			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", key, err)
 			continue
 		}
 		dst := filepath.Join(outDir, key+".png")
@@ -133,7 +147,7 @@ func run(size int, outDir string, verbose bool) error {
 func clean(dir string) error {
 	matches, err := filepath.Glob(filepath.Join(dir, "*.png"))
 	if err != nil {
-		return err
+		return fmt.Errorf("listing old icons in %s: %w", dir, err)
 	}
 	for _, path := range matches {
 		if err := os.Remove(path); err != nil {

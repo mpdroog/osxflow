@@ -3,6 +3,8 @@ package desktop
 // Scanning the XDG application directories.
 
 import (
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -15,9 +17,15 @@ import (
 // Errors reading individual files are collected rather than returned:
 // one unreadable entry out of 150 should cost the user that entry, not
 // the launcher. The caller gets them so they can be logged once at
-// startup instead of silently swallowed.
+// startup instead of silently swallowed. Not knowing the home directory
+// is one of them: it costs the user's own entries, not the system's.
 func Scan() (apps []App, problems []error) {
-	return ScanDirs(DataDirs())
+	dirs, err := DataDirs()
+	apps, problems = ScanDirs(dirs)
+	if err != nil {
+		problems = append(problems, err)
+	}
+	return apps, problems
 }
 
 // ScanDirs is Scan against an explicit directory list, which is what makes
@@ -106,9 +114,12 @@ func scanOne(dir string, seen map[string]bool) (apps []scanned, problems []error
 	root := filepath.Clean(dir)
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			// A missing directory is the normal case, not a problem worth
-			// reporting: most systems have only two of the four.
-			if os.IsNotExist(err) {
+			// A missing applications directory is the normal case, not a
+			// problem worth reporting: most systems have only two of the
+			// four. Only the directory itself gets that pass. Something
+			// missing further down was there a moment ago when its parent
+			// was listed -- it vanished mid-walk -- and that is reported.
+			if path == root && errors.Is(err, fs.ErrNotExist) {
 				return nil
 			}
 			problems = append(problems, err)
@@ -121,7 +132,11 @@ func scanOne(dir string, seen map[string]bool) (apps []scanned, problems []error
 			return nil
 		}
 
-		id, depth := desktopID(root, path)
+		id, depth, err := desktopID(root, path)
+		if err != nil {
+			problems = append(problems, err)
+			return nil
+		}
 		// XDG shadowing: an id already claimed by an earlier directory
 		// hides this one entirely, even if this file would parse and that
 		// one did not.
@@ -130,11 +145,11 @@ func scanOne(dir string, seen map[string]bool) (apps []scanned, problems []error
 		}
 		seen[id] = true
 
-		app, ok, err := Load(path, id)
+		app, ok, fileProblems, err := Load(path, id)
 		if err != nil {
 			problems = append(problems, err)
-			return nil
 		}
+		problems = append(problems, fileProblems...)
 		if ok {
 			apps = append(apps, scanned{app: app, depth: depth})
 		}
@@ -154,24 +169,41 @@ func scanOne(dir string, seen map[string]bool) (apps []scanned, problems []error
 // uses to prefer a top-level entry over a nested copy. That count cannot
 // be recovered from the id afterwards, because filenames contain dashes
 // of their own: "webapp-manager.desktop" is at depth 0 despite its dash.
-func desktopID(root, path string) (id string, depth int) {
+//
+// The walk only hands it paths under root, so Rel cannot fail in practice;
+// if it ever does, the file's id is unknowable and so is what it shadows,
+// and guessing one could hide a different application.
+func desktopID(root, path string) (id string, depth int, err error) {
 	rel, err := filepath.Rel(root, path)
 	if err != nil {
-		return filepath.Base(path), 0
+		return "", 0, fmt.Errorf("naming %s relative to %s: %w", path, root, err)
 	}
 	return strings.ReplaceAll(rel, string(filepath.Separator), "-"),
-		strings.Count(rel, string(filepath.Separator))
+		strings.Count(rel, string(filepath.Separator)), nil
 }
 
 // DataDirs returns the applications directories in precedence order,
 // applying the defaults the XDG basedir spec mandates when the variables
 // are unset — which they usually are.
-func DataDirs() []string {
-	var dirs []string
+//
+// Without XDG_DATA_HOME the user's own directory is found through $HOME.
+// If that fails the system directories are still returned, along with the
+// error: they are usable, but the list is missing the user's entries and
+// the caller should say so.
+func DataDirs() ([]string, error) {
+	var (
+		dirs    []string
+		homeErr error
+	)
 	if home := os.Getenv("XDG_DATA_HOME"); home != "" {
 		dirs = append(dirs, filepath.Join(home, "applications"))
-	} else if h, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(h, ".local", "share", "applications"))
+	} else {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			homeErr = fmt.Errorf("leaving out the user's own applications: %w", err)
+		} else {
+			dirs = append(dirs, filepath.Join(h, ".local", "share", "applications"))
+		}
 	}
 
 	data := os.Getenv("XDG_DATA_DIRS")
@@ -183,5 +215,5 @@ func DataDirs() []string {
 			dirs = append(dirs, filepath.Join(d, "applications"))
 		}
 	}
-	return dirs
+	return dirs, homeErr
 }
