@@ -134,6 +134,29 @@ func TestRevealOffset(t *testing.T) {
 	}
 }
 
+// The hidden end is where the easing is steepest, so a reveal that settles
+// merely near zero leaves a band of the window on screen -- over the
+// trigger, where it swallows the pointer the trigger should have seen.
+func TestRevealHidesFullyOffScreen(t *testing.T) {
+	r := NewReveal()
+	const height float64 = 293
+	r.Show()
+	for i := 0; i < 1000 && !r.Settled(); i++ {
+		r.Step(0.008)
+	}
+	r.Hide()
+	for i := 0; i < 1000 && !r.Settled(); i++ {
+		r.Step(0.008)
+	}
+	if !r.Hidden() {
+		t.Fatal("reveal never settled hidden")
+	}
+	if got := r.Offset(height); got != height {
+		t.Errorf("hidden offset = %g, want exactly %g; %g px stays on screen",
+			got, height, height-got)
+	}
+}
+
 func TestEaseOutCubicClamps(t *testing.T) {
 	for _, tc := range []struct{ in, want float64 }{
 		{-1, 0}, {0, 0}, {1, 1}, {2, 1},

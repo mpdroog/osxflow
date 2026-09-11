@@ -133,6 +133,15 @@ func (d *dockApp) enter(e xproto.EnterNotifyEvent) (show, leaving bool, err erro
 // down the screen, which is not the same question at all while the dock is
 // in motion.
 func (d *dockApp) pointerAt(x, y, rootY float64) (show, leaving bool, err error) {
+	// The row may have changed while the dock was down. The trigger catches
+	// up on that before revealing, but the pointer can reach the dock's own
+	// window without passing through the trigger, and hit-testing the new
+	// items against the last frame's placements indexes past the end.
+	if d.stale {
+		if err := d.redraw(); err != nil {
+			return false, false, err
+		}
+	}
 	d.cursorX = x
 	inside := d.overPanel(x, y) || d.atBottomEdge(rootY)
 	hover := dock.Hit(d.items, d.places, d.th.baselineY(), x, y)

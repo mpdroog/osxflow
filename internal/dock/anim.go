@@ -38,6 +38,14 @@ func (a *Anim) Step(dt float64) bool {
 		return true
 	}
 	a.Value += diff * (1 - math.Exp(-dt/a.Tau))
+	// Land exactly on the target once within epsilon. From here Done says
+	// settled and the caller stops stepping, so a value left a hair short
+	// stays short for good -- and through the reveal's easing, which is
+	// steepest at the hidden end, that hair parked a "hidden" dock forty
+	// pixels up the screen, on top of its own reveal trigger.
+	if math.Abs(a.Target-a.Value) < epsilon {
+		a.Value = a.Target
+	}
 	return true
 }
 
