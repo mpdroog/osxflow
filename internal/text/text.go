@@ -30,6 +30,19 @@ var Candidates = []string{
 	"/usr/share/fonts/noto/NotoSans-Regular.ttf",
 }
 
+// BoldCandidates is the search path for the heavier weight used to set a
+// title apart from the text under it. Ubuntu Medium comes first: at
+// notification sizes Bold is heavier than the distinction needs.
+var BoldCandidates = []string{
+	"/usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf",
+	"/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+	"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+	"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+	"/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+	"/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+	"/usr/share/fonts/noto/NotoSans-Bold.ttf",
+}
+
 // DPI is fixed at the X11 default. Display scaling is applied to point
 // sizes instead, so that one number controls everything.
 const DPI = 72 * 96 / 72

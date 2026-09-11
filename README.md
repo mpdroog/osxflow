@@ -4,7 +4,7 @@ Small, self-contained desktop tools for X11, written in Go. One static
 binary each, no cgo, no runtime dependencies.
 
 The name is the theme: this machine runs XFCE with macOS-shaped habits
-(see [gokeyd](../gokeyd) for the keyboard half), and these are the pieces
+(see [gokeyd](https://github.com/mpdroog/gokeyd) for the keyboard half), and these are the pieces
 that fill in what that arrangement is missing.
 
 ## Tools
@@ -13,6 +13,7 @@ that fill in what that arrangement is missing.
 | --- | --- |
 | [`cmd/launcher`](cmd/launcher) | Keyboard launcher: fuzzy app search that learns what you use, focuses a window you already have instead of starting a second copy, and a calculator. Replaces ulauncher at ~15 MB instead of ~190 MB. |
 | [`cmd/dock`](cmd/dock) | Magnifying, auto-hiding dock with running-app indicators and Downloads/Trash stacks. Replaces plank at ~19 MB instead of ~51 MB, and at the right size on a HiDPI screen. |
+| [`cmd/notifyd`](cmd/notifyd) | macOS-style notification banners: slide in top right, pause while hovered, actions as buttons, honours the panel's do-not-disturb. Replaces xfce4-notifyd at ~19 MB instead of ~35 MB. |
 
 ## Build
 
@@ -25,6 +26,16 @@ that fill in what that arrangement is missing.
     make install    # into ~/.local/bin
 
 Every binary is built with `CGO_ENABLED=0` and is statically linked.
+
+`make install` only copies the binaries. Each tool replaces something
+XFCE already runs, and its own README says how to switch over, and back:
+
+- `launcher` is bound to a keyboard shortcut and replaces ulauncher — see
+  [Use](cmd/launcher/README.md#use).
+- `dock` is started at login and replaces plank — see
+  [Installing](cmd/dock/README.md#installing).
+- `notifyd` is started by the session bus and replaces xfce4-notifyd —
+  see [Installing](cmd/notifyd/README.md#installing).
 
 ## Adding a tool
 

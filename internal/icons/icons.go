@@ -229,7 +229,10 @@ func Fallback(label string, size int, face font.Face) *image.RGBA {
 	// would go, so centring on the ascent looks low.
 	metrics := face.Metrics()
 	baseline := size/2 + metrics.Ascent.Round()/2 - metrics.Descent.Round()/3
-	text.DrawCentred(img, face, color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xf0},
+	// NRGBA, not RGBA: color.RGBA is premultiplied, so white at alpha 0xf0
+	// written as RGBA{255, 255, 255, 0xf0} is not a colour at all, and the
+	// blend overflows into a dark letter.
+	text.DrawCentred(img, face, color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xf0},
 		size/2, baseline, initial, size)
 	return img
 }

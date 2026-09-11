@@ -32,7 +32,7 @@ Or from the command line:
     xfconf-query -c xfce4-keyboard-shortcuts \
       -p '/commands/custom/<Alt>F1' -n -t string -s ~/.local/bin/launcher
 
-On this machine gokeyd already rewrites Cmd+Space to Alt+F1, so binding
+On this machine [gokeyd](https://github.com/mpdroog/gokeyd) already rewrites Cmd+Space to Alt+F1, so binding
 Alt+F1 is what makes Cmd+Space open the launcher.
 
 ### Keys

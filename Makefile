@@ -34,6 +34,9 @@ fuzz:
 	go test ./internal/dock   -run=XXX -fuzz=FuzzLayout           -fuzztime=20s
 	go test ./internal/paint  -run=XXX -fuzz=FuzzRoundRect        -fuzztime=20s
 	go test ./internal/text   -run=XXX -fuzz=FuzzTruncate         -fuzztime=20s
+	go test ./internal/text   -run=XXX -fuzz=FuzzWrap             -fuzztime=20s
+	go test ./internal/notify -run=XXX -fuzz=FuzzStripMarkup      -fuzztime=20s
+	go test ./internal/notify -run=XXX -fuzz=FuzzDecodePixels     -fuzztime=20s
 	go test ./internal/geom   -run=XXX -fuzz=FuzzI16              -fuzztime=10s
 	go test ./internal/geom   -run=XXX -fuzz=FuzzU16              -fuzztime=10s
 	go test ./internal/stack  -run=XXX -fuzz=FuzzParseTrashInfo   -fuzztime=20s

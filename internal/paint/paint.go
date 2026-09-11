@@ -321,6 +321,38 @@ func overRGBA(dst, src *image.RGBA, r image.Rectangle, x, y int) {
 	}
 }
 
+// Fade writes src into dst with its opacity scaled by alpha, which is one
+// frame of fading something out.
+//
+// Both images are premultiplied, so scaling every channel -- colour and
+// alpha alike -- by the same factor is the whole operation: no blend, and
+// nothing to know about what lies underneath. That makes it a copy with a
+// multiply, cheap enough to run on every frame of a fade instead of
+// redrawing the thing being faded. dst and src must have the same bounds;
+// when they do not, dst is left alone.
+func Fade(dst, src *image.RGBA, alpha float64) {
+	if dst.Bounds() != src.Bounds() {
+		return
+	}
+	switch {
+	case !(alpha > 0): // also catches NaN
+		alpha = 0
+	case alpha > 1:
+		alpha = 1
+	}
+	a := uint32(alpha*255 + 0.5)
+	n := min(len(dst.Pix), len(src.Pix))
+	if a == 0xff {
+		copy(dst.Pix[:n], src.Pix[:n])
+		return
+	}
+	d, s := dst.Pix[:n], src.Pix[:n]
+	for i := range s {
+		//nolint:gosec // v*a/255 with both at most 255 fits a byte
+		d[i] = uint8((uint32(s[i])*a + 127) / 255)
+	}
+}
+
 // OverAlpha is Over with a uniform extra opacity applied to src, used to
 // fade things in and out.
 func OverAlpha(dst *image.RGBA, src image.Image, x, y int, alpha float64) {

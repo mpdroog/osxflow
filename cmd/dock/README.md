@@ -58,6 +58,42 @@ Run `make icons` after installing an application or changing icon theme.
 An application with no embedded icon gets a tinted tile with its initial,
 so a fresh install looks unfamiliar rather than broken.
 
+## Installing
+
+**1. Build and install the binary** into `~/.local/bin`:
+
+    make dock
+    install -m755 bin/dock ~/.local/bin/dock
+
+**2. Start it at login** with an autostart entry:
+
+    cat > ~/.config/autostart/dock.desktop <<EOF
+    [Desktop Entry]
+    Name=Dock
+    GenericName=Dock
+    Comment=macOS-style application dock (osxflow)
+    Exec=$HOME/.local/bin/dock
+    Terminal=false
+    Type=Application
+    X-GNOME-Autostart-enabled=true
+    EOF
+
+**3. Stop plank starting at login.** Keep a copy of its entry, then hide it:
+
+    cp ~/.config/autostart/plank.desktop ~/.config/autostart/plank.desktop.bak
+    printf 'Hidden=true\n' >> ~/.config/autostart/plank.desktop
+
+If plank has no entry in `~/.config/autostart/`, copy the system one there
+first, from `/etc/xdg/autostart/` or `/usr/share/applications/`.
+
+**4. Switch over now**, without logging out:
+
+    pkill -x plank
+    ~/.local/bin/dock &
+
+To go back, restore `plank.desktop.bak`, delete `dock.desktop`, and log out
+and back in.
+
 ## Debugging
 
 `go run ./tools/dockstate` prints every window, which application the dock
