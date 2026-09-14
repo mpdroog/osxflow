@@ -47,7 +47,7 @@ func New(conn *dbus.Conn) *Client { return &Client{conn: conn} }
 // which in xfconf means it holds its program's built-in default.
 var ErrNotSet = errors.New("xfconf property not set")
 
-// ErrNoXfconf is returned by Get when nothing on the bus answers for
+// ErrNoXfconf is returned by Get and Set when nothing on the bus answers for
 // xfconfd, which means the session is not XFCE (or xfconf is not
 // installed). Every property then holds its program's built-in default, so
 // a caller treats this as information, not as a fault.
@@ -77,6 +77,29 @@ func (c *Client) Get(channel, property string) (any, error) {
 		return nil, fmt.Errorf("reading %s %s: %w", channel, property, err)
 	}
 	return v.Value(), nil
+}
+
+// Set writes one property, creating it if it has never been set.
+//
+// The value's Go type becomes the property's xfconf type, so pass the type
+// the owning program reads -- a bool for a switch, an int32 for a number.
+// xfconfd then announces the change like any other, so the program that
+// owns the setting (xfce4-power-manager for presentation mode, say) acts on
+// it at once, as it would on a change made in its own settings dialog.
+func (c *Client) Set(channel, property string, value any) error {
+	err := c.conn.Object(BusName, ObjectPath).
+		Call(Interface+".SetProperty", 0, channel, property, dbus.MakeVariant(value)).Err
+	if err == nil {
+		return nil
+	}
+	var dbusErr dbus.Error
+	if errors.As(err, &dbusErr) {
+		switch dbusErr.Name {
+		case "org.freedesktop.DBus.Error.ServiceUnknown", "org.freedesktop.DBus.Error.NameHasNoOwner":
+			return fmt.Errorf("writing %s %s: %w: %w", channel, property, ErrNoXfconf, err)
+		}
+	}
+	return fmt.Errorf("writing %s %s: %w", channel, property, err)
 }
 
 // Watch delivers every change to a channel until the connection closes,

@@ -2,6 +2,7 @@ package xfconf
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,13 +11,35 @@ import (
 	"github.com/mpdroog/osxflow/internal/dbustest"
 )
 
-// fakeXfconfd answers GetProperty the way xfconfd does, including its
-// error for a property that was never set.
+// fakeXfconfd answers GetProperty and SetProperty the way xfconfd does,
+// including its error for a property that was never set. It is locked
+// because godbus answers each call on a goroutine of its own, and the race
+// detector cannot see the ordering a reply through a socket provides.
 type fakeXfconfd struct {
+	mu    sync.Mutex
 	props map[string]dbus.Variant
 }
 
+// readOnlyChannel is a channel the fake refuses writes to, the way xfconfd
+// refuses a property locked by the administrator.
+const readOnlyChannel = "locked"
+
+func (f *fakeXfconfd) SetProperty(channel, property string, value dbus.Variant) *dbus.Error {
+	if channel == readOnlyChannel {
+		return &dbus.Error{
+			Name: "org.xfce.Xfconf.Error.PermissionDenied",
+			Body: []any{"Permission denied while modifying property \"" + property + "\" on channel \"" + channel + "\""},
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.props[channel+property] = value
+	return nil
+}
+
 func (f *fakeXfconfd) GetProperty(channel, property string) (dbus.Variant, *dbus.Error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if v, ok := f.props[channel+property]; ok {
 		return v, nil
 	}
@@ -53,6 +76,52 @@ func TestGetReadsAProperty(t *testing.T) {
 	}
 	if v, err := client.Get("xfce4-notifyd", "/expire-timeout"); err != nil || v != int32(7) {
 		t.Errorf("expire-timeout = %#v, %v; want int32(7)", v, err)
+	}
+}
+
+func TestSetWritesAProperty(t *testing.T) {
+	_, client, _ := startXfconfd(t)
+	// A property never set before, as presentation mode is on a desktop
+	// where nobody has used it yet.
+	if err := client.Set("xfce4-power-manager", "/xfce4-power-manager/presentation-mode", true); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if v, err := client.Get("xfce4-power-manager", "/xfce4-power-manager/presentation-mode"); err != nil || v != true {
+		t.Errorf("after Set, Get = %#v, %v; want true", v, err)
+	}
+	// The value's Go type is the type written.
+	if err := client.Set("xfce4-notifyd", "/expire-timeout", int32(3)); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if v, err := client.Get("xfce4-notifyd", "/expire-timeout"); err != nil || v != int32(3) {
+		t.Errorf("after Set, Get = %#v, %v; want int32(3)", v, err)
+	}
+}
+
+func TestSetWithoutXfconfdIsErrNoXfconf(t *testing.T) {
+	client := New(dbustest.Conn(t, dbustest.Start(t)))
+	err := client.Set("xfce4-power-manager", "/xfce4-power-manager/presentation-mode", true)
+	if !errors.Is(err, ErrNoXfconf) {
+		t.Fatalf("err = %v, want ErrNoXfconf", err)
+	}
+	var dbusErr dbus.Error
+	if !errors.As(err, &dbusErr) {
+		t.Errorf("err = %v, want the bus's dbus.Error kept", err)
+	}
+}
+
+func TestSetRefusedIsNotErrNoXfconf(t *testing.T) {
+	_, client, _ := startXfconfd(t)
+	err := client.Set(readOnlyChannel, "/anything", true)
+	if err == nil {
+		t.Fatal("Set on a locked channel succeeded")
+	}
+	if errors.Is(err, ErrNoXfconf) {
+		t.Errorf("err = %v; a refusal from a running xfconfd is not ErrNoXfconf", err)
+	}
+	var dbusErr dbus.Error
+	if !errors.As(err, &dbusErr) || dbusErr.Name != "org.xfce.Xfconf.Error.PermissionDenied" {
+		t.Errorf("err = %v, want xfconfd's PermissionDenied kept", err)
 	}
 }
 
