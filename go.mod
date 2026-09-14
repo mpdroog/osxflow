@@ -10,6 +10,7 @@ require (
 
 require (
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
+	github.com/jfreymuth/pulse v0.1.3
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 )
