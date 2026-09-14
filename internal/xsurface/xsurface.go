@@ -108,6 +108,49 @@ func rowsPerRequest(maxLenUnits uint16, width int) int {
 	return budget / (width * 4)
 }
 
+// Put uploads img into a drawable that is not a Surface's -- a root
+// window's background pixmap, say -- a server-sized slice of rows at a
+// time.
+//
+// Unlike Flush it checks every request: it runs once rather than per
+// frame, and its caller has no event loop to hear about a failure later.
+// The drawable must be depth 24 or 32 with 32 bits per pixel, which is what
+// img's four bytes a pixel become.
+func Put(conn *xgb.Conn, d xproto.Drawable, gc xproto.Gcontext, depth byte, img *image.RGBA) error {
+	b := img.Bounds()
+	width, height := b.Dx(), b.Dy()
+	if b.Min != (image.Point{}) || img.Stride != width*4 {
+		return fmt.Errorf("image must start at the origin with a stride of 4 bytes a pixel, got %v stride %d", b, img.Stride)
+	}
+	setup := xproto.Setup(conn)
+	if bpp, ok := bitsPerPixel(setup, depth); !ok || bpp != 32 {
+		return fmt.Errorf("depth %d is not stored at 32 bits a pixel on this server (found %t, %d)", depth, ok, bpp)
+	}
+	buf := make([]byte, len(img.Pix))
+	encodeInto(buf, img.Pix, setup.ImageByteOrder == xproto.ImageOrderLSBFirst)
+
+	rows := rowsPerRequest(setup.MaximumRequestLength, width)
+	stride := width * 4
+	for y := 0; y < height; y += rows {
+		n := min(rows, height-y)
+		if err := xproto.PutImageChecked(conn, xproto.ImageFormatZPixmap, d, gc,
+			geom.U16(width), geom.U16(n), 0, geom.I16(y), 0, depth,
+			buf[y*stride:(y+n)*stride]).Check(); err != nil {
+			return fmt.Errorf("uploading rows %d to %d: %w", y, y+n, err)
+		}
+	}
+	return nil
+}
+
+func bitsPerPixel(setup *xproto.SetupInfo, depth byte) (byte, bool) {
+	for _, f := range setup.PixmapFormats {
+		if f.Depth == depth {
+			return f.BitsPerPixel, true
+		}
+	}
+	return 0, false
+}
+
 // Image returns the buffer to draw into.
 func (s *Surface) Image() *image.RGBA { return s.img }
 
@@ -162,12 +205,16 @@ func (s *Surface) Copy() error {
 // millisecond of an 8 ms budget on four dependent byte loads and stores
 // where one 32-bit load, a swap of two of its bytes and one store will do.
 func (s *Surface) encode() {
-	src := s.img.Pix
-	if !s.swapRB {
-		copy(s.buf, src)
+	encodeInto(s.buf, s.img.Pix, s.swapRB)
+}
+
+// encodeInto writes src, Go's R,G,B,A, into dst in the server's order.
+func encodeInto(dst, src []byte, swapRB bool) {
+	if !swapRB {
+		copy(dst, src)
 		return
 	}
-	dst := s.buf[:len(src)]
+	dst = dst[:len(src)]
 	for i := 0; i+4 <= len(src); i += 4 {
 		in := src[i : i+4 : i+4]
 		out := dst[i : i+4 : i+4]
