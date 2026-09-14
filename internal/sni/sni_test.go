@@ -112,8 +112,29 @@ func TestClicks(t *testing.T) {
 		}
 	}
 
-	if err := client.Object(it.name, Path).Call(Interface+".Scroll", 0, int32(1), "vertical").Err; err != nil {
-		t.Errorf("Scroll: %v", err)
+	for _, tc := range []struct {
+		delta       int32
+		orientation string
+		want        Click
+	}{
+		{1, "vertical", Click{Kind: Scroll, Delta: 1}},
+		{-2, "Horizontal", Click{Kind: Scroll, Delta: -2, Horizontal: true}},
+	} {
+		done := make(chan error, 1)
+		go func() {
+			done <- client.Object(it.name, Path).Call(Interface+".Scroll", 0, tc.delta, tc.orientation).Err
+		}()
+		select {
+		case c := <-it.Clicks():
+			if c != tc.want {
+				t.Errorf("Scroll(%d, %q) delivered %+v, want %+v", tc.delta, tc.orientation, c, tc.want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("Scroll(%d, %q) delivered nothing", tc.delta, tc.orientation)
+		}
+		if err := <-done; err != nil {
+			t.Errorf("Scroll: %v", err)
+		}
 	}
 }
 

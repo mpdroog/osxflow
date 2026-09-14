@@ -2,7 +2,6 @@ package main
 
 import (
 	"image"
-	"math"
 	"strings"
 	"testing"
 
@@ -134,29 +133,5 @@ func TestRenderIconVPN(t *testing.T) {
 	}
 	if opaque(badged) == 0 {
 		t.Error("the padlock lights nothing")
-	}
-}
-
-func TestShapes(t *testing.T) {
-	b := box(10, 10, 5, 3, 1)
-	if d := b(10, 10); d >= 0 {
-		t.Errorf("box centre distance %v, want negative", d)
-	}
-	if d := b(20, 10); math.Abs(d-5) > 1e-9 {
-		t.Errorf("box distance 5 to the right of its edge = %v", d)
-	}
-	c := circle(0, 0, 2)
-	if d := c(3, 4); math.Abs(d-3) > 1e-9 {
-		t.Errorf("circle distance = %v, want 3", d)
-	}
-	if d := union(c, b)(10, 10); d >= 0 {
-		t.Errorf("union inside the box = %v", d)
-	}
-	for _, tc := range []struct {
-		d, want float64
-	}{{-5, 1}, {0, 0.5}, {5, 0}} {
-		if got := coverage(tc.d); got != tc.want {
-			t.Errorf("coverage(%v) = %v, want %v", tc.d, got, tc.want)
-		}
 	}
 }

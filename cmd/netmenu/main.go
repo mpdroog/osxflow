@@ -10,7 +10,7 @@
 // the log.
 //
 // The NetworkManager side (internal/netmgr) and the tray icon
-// (internal/sni) are D-Bus only. The menu window here is X11.
+// (internal/sni) are D-Bus only. The menu window (internal/menu) is X11.
 package main
 
 import (
@@ -19,19 +19,19 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"slices"
 	"time"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/jezek/xgb"
-	"github.com/jezek/xgb/xproto"
 	"github.com/jezek/xgbutil"
-	"golang.org/x/image/font"
 
+	"github.com/mpdroog/osxflow/internal/desktop"
 	"github.com/mpdroog/osxflow/internal/errlog"
+	"github.com/mpdroog/osxflow/internal/launch"
+	"github.com/mpdroog/osxflow/internal/menu"
 	"github.com/mpdroog/osxflow/internal/netmgr"
-	"github.com/mpdroog/osxflow/internal/scale"
 	"github.com/mpdroog/osxflow/internal/sni"
-	"github.com/mpdroog/osxflow/internal/text"
 )
 
 func main() {
@@ -46,7 +46,7 @@ func main() {
 func start() error {
 	var (
 		scaleFlag = flag.Float64("scale", 0, "display scale factor (0 detects it)")
-		verbose   = flag.Bool("v", false, "log registrations and state changes")
+		verbose   = flag.Bool("v", false, "log registrations, clicks and icon changes")
 	)
 	flag.Parse()
 
@@ -65,15 +65,9 @@ func start() error {
 }
 
 type app struct {
-	X            *xgbutil.XUtil
-	conn         *xgb.Conn
-	screen       *xproto.ScreenInfo
-	visual       argbVisual
-	workareaAtom xproto.Atom
-	escape       []xproto.Keycode
-
-	th    *theme
-	faces *faces
+	X    *xgbutil.XUtil
+	conn *xgb.Conn
+	host *menu.Host
 
 	sys     *dbus.Conn
 	session *dbus.Conn
@@ -89,11 +83,11 @@ type app struct {
 	refreshC     <-chan time.Time
 	lastScan     time.Time
 
-	menu *menu
-
 	lim     *errlog.Limiter
 	verbose bool
 }
+
+var _ actions = (*app)(nil)
 
 // callTimeout bounds every call to NetworkManager: a hung daemon should
 // cost a log line, not a frozen menu.
@@ -104,24 +98,27 @@ const callTimeout = 5 * time.Second
 // turn; reading after each would be thirty snapshots in a row.
 const settle = 150 * time.Millisecond
 
+// scanSpacing is how often opening the menu may ask for a scan.
+// NetworkManager refuses requests closer together than about ten seconds
+// anyway, and a refusal is only noise in the log.
+const scanSpacing = 30 * time.Second
+
 const (
 	logBurst = 5
 	logEvery = time.Minute
 )
 
 func newApp(scaleOverride float64, verbose bool) (*app, error) {
-	X, err := xgbutil.NewConn()
+	xu, err := xgbutil.NewConn()
 	if err != nil {
 		return nil, fmt.Errorf("connecting to X display: %w", err)
 	}
 	a := &app{
-		X:       X,
-		conn:    X.Conn(),
+		X:       xu,
+		conn:    xu.Conn(),
 		lim:     &errlog.Limiter{Burst: logBurst, Per: logEvery},
 		verbose: verbose,
 	}
-	a.screen = xproto.Setup(a.conn).DefaultScreen(a.conn)
-
 	abandon := func(err error) (*app, error) {
 		if closeErr := a.close(); closeErr != nil {
 			log.Printf("cleaning up after a failed start: %v", closeErr)
@@ -129,26 +126,7 @@ func newApp(scaleOverride float64, verbose bool) (*app, error) {
 		return nil, err
 	}
 
-	visual, ok := findARGB(a.screen)
-	if !ok {
-		return abandon(errors.New("no 32-bit TrueColor visual; netmenu needs a compositor " +
-			"(xfwm4: Settings > Window Manager Tweaks > Compositor)"))
-	}
-	a.visual = visual
-	if a.workareaAtom, err = atom(a.conn, "_NET_WORKAREA"); err != nil {
-		return abandon(err)
-	}
-	if a.escape, err = escapeKeycodes(a.conn); err != nil {
-		// The menu still closes on a click elsewhere or on the icon.
-		log.Printf("escape key: %v; Escape will not close the menu", err)
-	}
-
-	factor, scaleErr := scale.Detect(X, scaleOverride)
-	if scaleErr != nil {
-		log.Printf("scale: %v", scaleErr)
-	}
-	a.th = newTheme(factor)
-	if a.faces, err = loadFaces(a.th); err != nil {
+	if a.host, err = menu.NewHost(xu, scaleOverride, menuWidth); err != nil {
 		return abandon(err)
 	}
 
@@ -196,7 +174,9 @@ func (a *app) run() error {
 	for {
 		select {
 		case ev := <-events:
-			a.handle(ev)
+			if err := a.host.Handle(ev); err != nil {
+				a.lim.Printf("menu", "drawing the menu: %v", err)
+			}
 
 		case err := <-xGone:
 			return err
@@ -270,67 +250,78 @@ func (a *app) refresh() {
 			a.lim.Printf("tooltip", "updating the tooltip: %v", err)
 		}
 	}
-	if a.menu != nil {
-		if err := a.menu.update(a); err != nil {
-			log.Printf("redrawing the menu: %v; closing it", err)
-			a.closeMenu()
-		}
+	if err := a.host.Update(buildRows(&a.state, a)); err != nil {
+		log.Printf("redrawing the menu: %v; it has been closed", err)
 	}
 }
 
 // clicked opens or closes the menu. Any button but the middle one does:
-// macOS has one menu for both, and so does this.
+// macOS has one menu for both, and so does this. The wheel does nothing.
 func (a *app) clicked(c sni.Click) {
-	if c.Kind == sni.SecondaryActivate {
+	if c.Kind == sni.SecondaryActivate || c.Kind == sni.Scroll {
 		return
 	}
-	if a.menu != nil {
-		a.closeMenu()
+	if a.host.IsOpen() {
+		a.host.Close()
 		return
 	}
-	// Placed under the pointer, which is on the icon when it is clicked,
-	// rather than where the tray says. XFCE's status tray is GTK and sends
-	// logical pixels: at 2x a click at 2103,42 arrives as 1051,21, and a
-	// menu placed there opens a screen's width to the left. Other trays
-	// send 0, 0. The pointer is in real pixels whatever the tray thinks.
-	x := c.X
-	reply, err := xproto.QueryPointer(a.conn, a.screen.Root).Reply()
+	x, err := a.host.PointerX()
 	if err != nil {
-		log.Printf("finding the pointer: %v; using the tray's position %d, %d", err, c.X, c.Y)
+		log.Printf("%v; using the tray's position %d", err, c.X)
+		x = c.X
 	} else {
-		x = int(reply.RootX)
-		a.debugf("click: tray sent %d,%d; pointer at %d,%d", c.X, c.Y, reply.RootX, reply.RootY)
+		a.debugf("click: tray sent %d,%d; pointer at x=%d", c.X, c.Y, x)
 	}
-	if err := a.openMenu(x); err != nil {
+	if err := a.host.Open(x, buildRows(&a.state, a)); err != nil {
 		log.Printf("opening the menu: %v", err)
+		return
 	}
+	a.scan()
 }
 
-func (a *app) handle(ev xgb.Event) {
-	m := a.menu
-	if m == nil {
+// scan asks for a fresh list of networks, no more than once every
+// scanSpacing.
+func (a *app) scan() {
+	dev := a.state.WifiDevice
+	if dev == "" || !a.state.WifiEnabled || time.Since(a.lastScan) < scanSpacing {
 		return
 	}
-	var err error
-	switch e := ev.(type) {
-	case xproto.ExposeEvent:
-		if e.Window == m.win {
-			err = m.surf.Copy()
-		}
-	case xproto.MotionNotifyEvent:
-		err = m.motion(a, int(e.EventX), int(e.EventY))
-	case xproto.ButtonPressEvent:
-		a.menuClick(e)
-	case xproto.KeyPressEvent:
-		for _, code := range a.escape {
-			if e.Detail == code {
-				a.closeMenu()
-				break
-			}
-		}
+	a.lastScan = time.Now()
+	a.async(func(ctx context.Context) error { return a.nm.RequestScan(ctx, dev) })
+}
+
+// The actions behind the menu's rows. NetworkManager's answer arrives as
+// signals, which redraw the menu and the icon; the calls themselves only
+// say whether a request was accepted.
+
+func (a *app) setWifi(on bool) {
+	a.async(func(ctx context.Context) error { return a.nm.SetWifi(ctx, on) })
+}
+
+func (a *app) join(n *netmgr.Network) {
+	profile, device := n.Saved, a.state.WifiDevice
+	a.async(func(ctx context.Context) error { return a.nm.Activate(ctx, profile, device) })
+}
+
+func (a *app) joinOpen(n *netmgr.Network) {
+	ssid, device, ap := slices.Clone(n.Raw), a.state.WifiDevice, n.AP
+	a.async(func(ctx context.Context) error { return a.nm.JoinOpen(ctx, ssid, device, ap) })
+}
+
+func (a *app) toggleVPN(v *netmgr.VPN) {
+	if v.On() {
+		active := v.Active
+		a.async(func(ctx context.Context) error { return a.nm.Deactivate(ctx, active) })
+		return
 	}
-	if err != nil {
-		a.lim.Printf("menu", "drawing the menu: %v", err)
+	profile := v.Connection
+	a.async(func(ctx context.Context) error { return a.nm.Activate(ctx, profile, "") })
+}
+
+func (a *app) settings() {
+	editor := &desktop.App{Name: "Network Connections", Argv: []string{"nm-connection-editor"}}
+	if err := launch.SpawnDetached(editor); err != nil {
+		log.Printf("opening network settings: %v", err)
 	}
 }
 
@@ -373,7 +364,9 @@ func (a *app) debugf(format string, args ...any) {
 // close releases what the app holds and copes with one only half set up.
 func (a *app) close() error {
 	var errs []error
-	a.closeMenu()
+	if a.host != nil {
+		errs = append(errs, a.host.Release())
+	}
 	if a.item != nil && a.session.Connected() {
 		errs = append(errs, a.item.Close())
 	}
@@ -388,49 +381,6 @@ func (a *app) close() error {
 			errs = append(errs, fmt.Errorf("closing the %s bus: %w", bus.name, err))
 		}
 	}
-	if a.faces != nil {
-		errs = append(errs, a.faces.close())
-	}
 	a.conn.Close()
-	return errors.Join(errs...)
-}
-
-type faces struct {
-	text, bold, section font.Face
-}
-
-func loadFaces(th *theme) (*faces, error) {
-	regular, _, err := text.Load(text.Candidates)
-	if err != nil {
-		return nil, fmt.Errorf("loading regular font: %w", err)
-	}
-	bold, _, boldErr := text.Load(text.BoldCandidates)
-	if boldErr != nil {
-		log.Printf("no bold font, using regular: %v", boldErr)
-		bold = regular
-	}
-	f := &faces{}
-	if f.text, err = text.Face(regular, th.textPt); err != nil {
-		return nil, fmt.Errorf("text face: %w", err)
-	}
-	if f.bold, err = text.Face(bold, th.textPt); err != nil {
-		return nil, errors.Join(fmt.Errorf("bold face: %w", err), f.close())
-	}
-	if f.section, err = text.Face(bold, th.sectionPt); err != nil {
-		return nil, errors.Join(fmt.Errorf("section face: %w", err), f.close())
-	}
-	return f, nil
-}
-
-func (f *faces) close() error {
-	var errs []error
-	for _, face := range []font.Face{f.text, f.bold, f.section} {
-		if face == nil {
-			continue
-		}
-		if err := face.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("closing a font face: %w", err))
-		}
-	}
 	return errors.Join(errs...)
 }

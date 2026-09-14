@@ -6,6 +6,7 @@ import (
 	"image"
 	"strings"
 
+	"github.com/mpdroog/osxflow/internal/glyph"
 	"github.com/mpdroog/osxflow/internal/netmgr"
 	"github.com/mpdroog/osxflow/internal/sni"
 )
@@ -63,22 +64,22 @@ func renderIcon(size int, s iconState) *image.RGBA {
 
 	switch {
 	case s.wired && s.level <= 0 && !s.connecting:
-		fill(img, b, colIconOn, wired(0, 0, side))
+		glyph.Fill(img, b, colIconOn, glyph.Wired(0, 0, side))
 	case s.level == levelOff:
-		drawWifi(img, 0, 0, side, -1, colIconOn, colIconOff)
+		glyph.Wifi(img, 0, 0, side, -1, colIconOn, colIconOff)
 	case s.connecting:
-		drawWifi(img, 0, 0, side, 0, colIconOn, colIconDim)
+		glyph.Wifi(img, 0, 0, side, 0, colIconOn, colIconDim)
 	case s.level == 0:
-		drawWifi(img, 0, 0, side, -1, colIconOn, colIconDim)
+		glyph.Wifi(img, 0, 0, side, -1, colIconOn, colIconDim)
 	default:
-		drawWifi(img, 0, 0, side, s.level, colIconOn, colIconDim)
+		glyph.Wifi(img, 0, 0, side, s.level, colIconOn, colIconDim)
 	}
 
 	if s.vpn {
 		badge := side * 0.5
-		shape := lock(side-badge, side-badge, badge)
-		erase(img, b, side*0.07, shape)
-		fill(img, b, colIconOn, shape)
+		shape := glyph.Lock(side-badge, side-badge, badge)
+		glyph.Erase(img, b, side*0.07, shape)
+		glyph.Fill(img, b, colIconOn, shape)
 	}
 	return img
 }

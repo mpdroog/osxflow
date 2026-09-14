@@ -18,6 +18,7 @@ import (
 	"image"
 	"math"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -60,13 +61,24 @@ const (
 	Activate          ClickKind = iota // primary button
 	SecondaryActivate                  // middle button
 	ContextMenu                        // secondary button
+	Scroll                             // the wheel, over the icon
 )
 
-// Click is one activation, at the screen position the tray reports. A tray
-// that does not know sends 0, 0.
+// Click is one activation, at the screen position the tray reports, or one
+// turn of the wheel.
+//
+// A tray that does not know the position sends 0, 0, and XFCE's status tray
+// sends it in GTK's logical pixels -- half the real ones at 2x -- so a
+// caller placing a window should ask the display server where the pointer
+// is instead.
 type Click struct {
 	Kind ClickKind
 	X, Y int
+
+	// Delta and Horizontal describe a Scroll. The size and sign of Delta
+	// are whatever the tray sends; the specification fixes neither.
+	Delta      int
+	Horizontal bool
 }
 
 // Options describes the item.
@@ -187,8 +199,8 @@ func fixed(v any) *prop.Prop {
 	return &prop.Prop{Value: v, Emit: prop.EmitFalse}
 }
 
-// Clicks delivers activations. The D-Bus call a click arrived on waits
-// until it is received, so receive promptly.
+// Clicks delivers activations and scrolls. The D-Bus call one arrived on
+// waits until it is received, so receive promptly.
 func (it *Item) Clicks() <-chan Click { return it.clicks }
 
 // Registrations delivers the result of every attempt to register with a
@@ -349,24 +361,28 @@ func toInt32(v int) int32 {
 type object struct{ it *Item }
 
 // Activate implements org.kde.StatusNotifierItem.Activate.
-func (o *object) Activate(x, y int32) *dbus.Error { return o.it.click(Activate, x, y) }
+func (o *object) Activate(x, y int32) *dbus.Error {
+	return o.it.deliver(Click{Kind: Activate, X: int(x), Y: int(y)})
+}
 
 // SecondaryActivate implements org.kde.StatusNotifierItem.SecondaryActivate.
 func (o *object) SecondaryActivate(x, y int32) *dbus.Error {
-	return o.it.click(SecondaryActivate, x, y)
+	return o.it.deliver(Click{Kind: SecondaryActivate, X: int(x), Y: int(y)})
 }
 
 // ContextMenu implements org.kde.StatusNotifierItem.ContextMenu.
-func (o *object) ContextMenu(x, y int32) *dbus.Error { return o.it.click(ContextMenu, x, y) }
+func (o *object) ContextMenu(x, y int32) *dbus.Error {
+	return o.it.deliver(Click{Kind: ContextMenu, X: int(x), Y: int(y)})
+}
 
-// Scroll implements org.kde.StatusNotifierItem.Scroll, which nothing here
-// has a use for. It still answers, so a tray does not log a failed call
-// for every wheel notch over the icon.
-func (o *object) Scroll(int32, string) *dbus.Error { return nil }
+// Scroll implements org.kde.StatusNotifierItem.Scroll.
+func (o *object) Scroll(delta int32, orientation string) *dbus.Error {
+	return o.it.deliver(Click{Kind: Scroll, Delta: int(delta), Horizontal: strings.EqualFold(orientation, "horizontal")})
+}
 
-func (it *Item) click(kind ClickKind, x, y int32) *dbus.Error {
+func (it *Item) deliver(c Click) *dbus.Error {
 	select {
-	case it.clicks <- Click{Kind: kind, X: int(x), Y: int(y)}:
+	case it.clicks <- c:
 		return nil
 	case <-it.done:
 		return dbus.MakeFailedError(errClosed)
