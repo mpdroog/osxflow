@@ -55,6 +55,9 @@ fuzz:
 	go test ./internal/mpris  -run=XXX -fuzz=FuzzParseMetadata    -fuzztime=20s
 	go test ./internal/rfkill -run=XXX -fuzz=FuzzParseEvent       -fuzztime=20s
 	go test ./internal/bluez  -run=XXX -fuzz=FuzzDisplayName      -fuzztime=20s
+	go test ./cmd/macmenu     -run=XXX -fuzz=FuzzParseOSRelease   -fuzztime=10s
+	go test ./cmd/macmenu     -run=XXX -fuzz=FuzzParseMeminfo     -fuzztime=10s
+	go test ./cmd/macmenu     -run=XXX -fuzz=FuzzParseUptime      -fuzztime=10s
 
 lint: errguard
 	gofmt -l .
