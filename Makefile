@@ -53,6 +53,8 @@ fuzz:
 	go test ./internal/audio  -run=XXX -fuzz=FuzzFraction         -fuzztime=20s
 	go test ./internal/audio  -run=XXX -fuzz=FuzzDescription      -fuzztime=20s
 	go test ./internal/mpris  -run=XXX -fuzz=FuzzParseMetadata    -fuzztime=20s
+	go test ./internal/rfkill -run=XXX -fuzz=FuzzParseEvent       -fuzztime=20s
+	go test ./internal/bluez  -run=XXX -fuzz=FuzzDisplayName      -fuzztime=20s
 
 lint: errguard
 	gofmt -l .

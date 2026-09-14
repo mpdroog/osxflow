@@ -16,6 +16,7 @@ that fill in what that arrangement is missing.
 | [`cmd/notifyd`](cmd/notifyd) | macOS-style notification banners: slide in top right, pause while hovered, actions as buttons, honours the panel's do-not-disturb. Replaces xfce4-notifyd at ~19 MB instead of ~35 MB. |
 | [`cmd/netmenu`](cmd/netmenu) | Network menu in the status tray: Wi-Fi switch, nearby networks, one-click join for known and open ones, VPN switches, and nm-connection-editor for everything else. Replaces nm-applet's icon and GTK menu, and deliberately not its secret agent. |
 | [`cmd/powermenu`](cmd/powermenu) | Battery menu in the status tray: charge, time left, battery health, screen and keyboard brightness sliders, presentation mode. Replaces the panel's power manager plugin; the power manager itself keeps running. |
+| [`cmd/bluemenu`](cmd/bluemenu) | Bluetooth menu in the status tray: radio switch, paired devices with connect/disconnect and battery, and the pairing agent's prompts. Replaces blueman's tray icon and applet. |
 | [`cmd/soundmenu`](cmd/soundmenu) | Sound menu in the status tray: volume, output and input devices, microphone, the media that is playing -- plus the volume keys and macOS's volume overlay. Replaces the panel's PulseAudio plugin. |
 
 ## Build

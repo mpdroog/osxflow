@@ -138,6 +138,20 @@ func speakerBody(u unit) SDF {
 	)
 }
 
+// Bluetooth is the Bluetooth rune: a vertical stroke with the two arrow
+// heads crossing it, drawn as strokes so it matches the other symbols'
+// weight.
+func Bluetooth(x0, y0, s float64) SDF {
+	u := unit{x0, y0, s}
+	return Union(
+		u.seg(0.5, 0.1, 0.5, 0.9),
+		u.seg(0.5, 0.1, 0.76, 0.32),
+		u.seg(0.76, 0.32, 0.26, 0.7),
+		u.seg(0.5, 0.9, 0.76, 0.68),
+		u.seg(0.76, 0.68, 0.26, 0.3),
+	)
+}
+
 // Headphones is a pair of headphones, for an output that is one.
 func Headphones(x0, y0, s float64) SDF {
 	u := unit{x0, y0, s}

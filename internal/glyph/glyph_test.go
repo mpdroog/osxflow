@@ -161,6 +161,7 @@ func TestSymbolsStayInTheirSquare(t *testing.T) {
 		"lock":          sdfDraw(Lock),
 		"wired":         sdfDraw(Wired),
 		"headphones":    sdfDraw(Headphones),
+		"bluetooth":     sdfDraw(Bluetooth),
 		"mic":           sdfDraw(Mic),
 		"bolt":          sdfDraw(Bolt),
 		"sun":           sdfDraw(Sun),
