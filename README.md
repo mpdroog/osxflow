@@ -15,6 +15,8 @@ that fill in what that arrangement is missing.
 | [`cmd/dock`](cmd/dock) | Magnifying, auto-hiding dock with running-app indicators and Downloads/Trash stacks. Replaces plank at ~19 MB instead of ~51 MB, and at the right size on a HiDPI screen. |
 | [`cmd/notifyd`](cmd/notifyd) | macOS-style notification banners: slide in top right, pause while hovered, actions as buttons, honours the panel's do-not-disturb. Replaces xfce4-notifyd at ~19 MB instead of ~35 MB. |
 | [`cmd/netmenu`](cmd/netmenu) | Network menu in the status tray: Wi-Fi switch, nearby networks, one-click join for known and open ones, VPN switches, and nm-connection-editor for everything else. Replaces nm-applet's icon and GTK menu, and deliberately not its secret agent. |
+| [`cmd/powermenu`](cmd/powermenu) | Battery menu in the status tray: charge, time left, battery health, screen and keyboard brightness sliders, presentation mode. Replaces the panel's power manager plugin; the power manager itself keeps running. |
+| [`cmd/soundmenu`](cmd/soundmenu) | Sound menu in the status tray: volume, output and input devices, microphone, the media that is playing -- plus the volume keys and macOS's volume overlay. Replaces the panel's PulseAudio plugin. |
 
 ## Build
 
@@ -40,6 +42,10 @@ XFCE already runs, and its own README says how to switch over, and back:
 - `netmenu` is started at login and replaces nm-applet, once every VPN's
   secrets are stored with NetworkManager — see
   [Installing](cmd/netmenu/README.md#installing).
+- `powermenu` and `soundmenu` are started at login and replace two panel
+  plugins, which come off the panel — see
+  [powermenu](cmd/powermenu/README.md#installing) and
+  [soundmenu](cmd/soundmenu/README.md#installing).
 
 ## Adding a tool
 
@@ -63,10 +69,19 @@ reach it. Most of what is there is shared rather than tool-specific:
 - `internal/xsurface` — getting an RGBA buffer onto a window.
 - `internal/geom` — clamping Go's `int` into X11's 16-bit geometry.
 - `internal/icons` — the icon set compiled into the dock.
-- `internal/netmgr` — NetworkManager over the system bus: a snapshot of
-  Wi-Fi, networks and VPNs, and the few calls that change them.
+- `internal/menu` — the tray tools' dropdown: a list of rows (switches,
+  sliders, device lists, media buttons) in a translucent X11 window, with
+  hovering, dragging and dismissal handled.
+- `internal/glyph` — small anti-aliased symbols from signed distance
+  functions: Wi-Fi, battery, speaker, microphone, media buttons.
 - `internal/sni` — an icon in the status tray via StatusNotifierItem,
   which is D-Bus and so works under Wayland panels too.
+- `internal/netmgr` — NetworkManager over the system bus: a snapshot of
+  Wi-Fi, networks and VPNs, and the few calls that change them.
+- `internal/upower` and `internal/backlight` — the battery from UPower,
+  and screen and keyboard brightness from sysfs, set through logind.
+- `internal/audio` and `internal/mpris` — PipeWire's PulseAudio server in
+  pure Go, and media players on the session bus.
 - `internal/dbustest` — a private D-Bus daemon for tests, so nothing
   touches the desktop's own session or system bus.
 

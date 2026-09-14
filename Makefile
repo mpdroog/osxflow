@@ -49,6 +49,10 @@ fuzz:
 	go test ./internal/scale  -run=XXX -fuzz=FuzzFromResourceString -fuzztime=20s
 	go test ./internal/netmgr -run=XXX -fuzz=FuzzDisplayName      -fuzztime=20s
 	go test ./internal/netmgr -run=XXX -fuzz=FuzzNetworks         -fuzztime=20s
+	go test ./internal/backlight -run=XXX -fuzz=FuzzParseValue    -fuzztime=20s
+	go test ./internal/audio  -run=XXX -fuzz=FuzzFraction         -fuzztime=20s
+	go test ./internal/audio  -run=XXX -fuzz=FuzzDescription      -fuzztime=20s
+	go test ./internal/mpris  -run=XXX -fuzz=FuzzParseMetadata    -fuzztime=20s
 
 lint: errguard
 	gofmt -l .
