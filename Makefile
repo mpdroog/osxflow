@@ -47,6 +47,8 @@ fuzz:
 	go test ./internal/xwin   -run=XXX -fuzz=FuzzDecodeProperty   -fuzztime=20s
 	go test ./internal/scale  -run=XXX -fuzz=FuzzParseXfconf      -fuzztime=20s
 	go test ./internal/scale  -run=XXX -fuzz=FuzzFromResourceString -fuzztime=20s
+	go test ./internal/netmgr -run=XXX -fuzz=FuzzDisplayName      -fuzztime=20s
+	go test ./internal/netmgr -run=XXX -fuzz=FuzzNetworks         -fuzztime=20s
 
 lint: errguard
 	gofmt -l .
