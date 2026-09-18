@@ -34,10 +34,13 @@ Locking is `xflock4`, which uses whichever locker XFCE is set up with.
 
 **2. Add a launcher for it at the left end of the panel.** Pick a plugin
 id that is not taken (`xfconf-query -c xfce4-panel -l | grep plugin-`),
-15 here (1-14 were taken), give it a launcher item, and put its id first in the panel's list:
+15 here (1-14 were taken), give it a launcher item, and put its id first in the panel's list.
+Its icon is [macmenu.svg](macmenu.svg), Tux's head (from Simple Icons, CC0)
+where macOS has its apple, named by absolute path:
 
+    install -Dm644 cmd/macmenu/macmenu.svg ~/.local/share/icons/hicolor/scalable/apps/macmenu.svg
     mkdir -p ~/.config/xfce4/panel/launcher-15
-    printf '[Desktop Entry]\nType=Application\nName=macmenu\nExec=%s/.local/bin/macmenu\nIcon=linuxmint-logo-simple-symbolic\n' "$HOME" \
+    printf '[Desktop Entry]\nType=Application\nName=macmenu\nExec=%s/.local/bin/macmenu\nIcon=%s/.local/share/icons/hicolor/scalable/apps/macmenu.svg\n' "$HOME" "$HOME" \
       > ~/.config/xfce4/panel/launcher-15/macmenu.desktop
     xfconf-query -c xfce4-panel -p /plugins/plugin-15 -n -t string -s launcher
     xfconf-query -c xfce4-panel -p /plugins/plugin-15/items -n --force-array -t string -s macmenu.desktop
