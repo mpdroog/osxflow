@@ -58,6 +58,10 @@ fuzz:
 	go test ./cmd/macmenu     -run=XXX -fuzz=FuzzParseOSRelease   -fuzztime=10s
 	go test ./cmd/macmenu     -run=XXX -fuzz=FuzzParseMeminfo     -fuzztime=10s
 	go test ./cmd/macmenu     -run=XXX -fuzz=FuzzParseUptime      -fuzztime=10s
+	go test ./internal/unpack -run=XXX -fuzz=FuzzDetect           -fuzztime=10s
+	go test ./internal/unpack -run=XXX -fuzz=FuzzClean            -fuzztime=10s
+	go test ./internal/unpack -run=XXX -fuzz=FuzzExtractTar       -fuzztime=20s
+	go test ./internal/unpack -run=XXX -fuzz=FuzzExtractZip       -fuzztime=20s
 
 lint: errguard
 	gofmt -l .
