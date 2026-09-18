@@ -1,6 +1,6 @@
 package main
 
-// What "About This Mac" shows, read from where the kernel and the
+// What "About This Linux" shows, read from where the kernel and the
 // distribution keep it. Every field is optional: one that cannot be read
 // is left out of the menu, and why goes to the log.
 

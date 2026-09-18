@@ -30,7 +30,7 @@ func mainRows(userName string, act actions) []menu.Row {
 		logOut = "Log Out " + userName
 	}
 	return []menu.Row{
-		action("About This Mac", act.about),
+		action("About This Linux", act.about),
 		separator(),
 		action("System Settings…", func() { act.run("xfce4-settings-manager") }),
 		action("Task Manager…", func() { act.run("xfce4-taskmanager") }),
@@ -47,7 +47,7 @@ func mainRows(userName string, act actions) []menu.Row {
 // aboutRows shows what could be read about the machine; a field that could
 // not be read is left out rather than shown blank.
 func aboutRows(a *about) []menu.Row {
-	rows := []menu.Row{{Kind: menu.Header, Label: "About This Mac", Detail: a.model}}
+	rows := []menu.Row{{Kind: menu.Header, Label: "About This Linux", Detail: a.model}}
 	for _, f := range []struct{ label, value string }{
 		{"", a.system},
 		{"Kernel ", a.kernel},

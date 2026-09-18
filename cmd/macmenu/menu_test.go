@@ -35,7 +35,7 @@ func labels(rows []menu.Row) string {
 func TestMainRows(t *testing.T) {
 	f := &fakeActions{}
 	rows := mainRows("MP Droog", f)
-	want := "About This Mac|--|System Settings…|Task Manager…|--|Sleep|Restart|Shut Down|--|Lock Screen|Log Out MP Droog"
+	want := "About This Linux|--|System Settings…|Task Manager…|--|Sleep|Restart|Shut Down|--|Lock Screen|Log Out MP Droog"
 	if got := labels(rows); got != want {
 		t.Fatalf("rows:\n got %s\nwant %s", got, want)
 	}
@@ -66,14 +66,14 @@ func TestMainRows(t *testing.T) {
 func TestAboutRows(t *testing.T) {
 	full := about{model: "MacBookPro14,1", system: "Linux Mint 22.1", kernel: "7.0.0-30-generic", memory: "16 GB", uptime: "3 h 12 min"}
 	rows := aboutRows(&full)
-	if got := labels(rows); got != "About This Mac|Linux Mint 22.1|Kernel 7.0.0-30-generic|Memory 16 GB|Up 3 h 12 min|--|OK" {
+	if got := labels(rows); got != "About This Linux|Linux Mint 22.1|Kernel 7.0.0-30-generic|Memory 16 GB|Up 3 h 12 min|--|OK" {
 		t.Errorf("rows: %s", got)
 	}
 	if rows[0].Detail != "MacBookPro14,1" {
 		t.Errorf("header detail = %q", rows[0].Detail)
 	}
 	partial := about{memory: "8 GB"}
-	if got := labels(aboutRows(&partial)); got != "About This Mac|Memory 8 GB|--|OK" {
+	if got := labels(aboutRows(&partial)); got != "About This Linux|Memory 8 GB|--|OK" {
 		t.Errorf("rows with only memory: %s", got)
 	}
 }

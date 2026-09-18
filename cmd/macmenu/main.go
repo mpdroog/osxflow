@@ -163,7 +163,7 @@ func (a *app) about() {
 		log.Printf("about this computer: %v", err)
 	}
 	if err := a.host.Open(a.x, aboutRows(&info)); err != nil {
-		log.Printf("opening About This Mac: %v", err)
+		log.Printf("opening About This Linux: %v", err)
 	}
 }
 

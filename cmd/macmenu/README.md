@@ -3,7 +3,7 @@
 The system menu at the left end of the panel, the way macOS has one under
 the Apple logo:
 
-- **About This Mac** -- model, system, kernel, memory and uptime.
+- **About This Linux** -- model, system, kernel, memory and uptime.
 - **System Settings…** -- xfce4-settings-manager.
 - **Task Manager…** -- xfce4-taskmanager.
 - **Sleep**, **Restart**, **Shut Down** -- each one happens on the click.
