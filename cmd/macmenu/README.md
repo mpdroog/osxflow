@@ -6,8 +6,8 @@ the Apple logo:
 - **About This Mac** -- model, system, kernel, memory and uptime.
 - **System Settings…** -- xfce4-settings-manager.
 - **Task Manager…** -- xfce4-taskmanager.
-- **Sleep**, **Restart…**, **Shut Down…** -- the last two ask first.
-- **Lock Screen** and **Log Out…** -- log out asks first too.
+- **Sleep**, **Restart**, **Shut Down** -- each one happens on the click.
+- **Lock Screen** and **Log Out**.
 
 Apps are not in it: finding and starting them is the launcher's job
 (Cmd+Space).
@@ -21,7 +21,8 @@ the first on the session bus (`org.osxflow.MacMenu`) and tells it to close.
 
 Sleep, restart, shut down and log out go through `xfce4-session-logout`,
 so they behave as the session's own dialog would -- the session is saved,
-and the screen is locked before sleeping -- only without that dialog.
+and the screen is locked before sleeping -- only without that dialog, and
+without one of its own: a row here does what it says straight away.
 Locking is `xflock4`, which uses whichever locker XFCE is set up with.
 
 ## Installing

@@ -167,12 +167,6 @@ func (a *app) about() {
 	}
 }
 
-func (a *app) confirm(k confirmKind) {
-	if err := a.host.Open(a.x, confirmRows(k, a)); err != nil {
-		log.Printf("opening the confirmation: %v", err)
-	}
-}
-
 // run starts argv detached, so it outlives macmenu, which exits as soon as
 // the menu has closed.
 func (a *app) run(argv ...string) {

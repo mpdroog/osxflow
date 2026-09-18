@@ -12,28 +12,6 @@ type actions interface {
 	about()
 	// run starts a program and lets the menu go.
 	run(argv ...string)
-	confirm(k confirmKind)
-}
-
-type confirmKind int
-
-const (
-	confirmRestart confirmKind = iota
-	confirmShutDown
-	confirmLogOut
-)
-
-// confirmations are the actions that end the session or the machine, and so
-// ask first, as macOS does. xfce4-session-logout does them the way the
-// session's own dialog would -- saving the session, locking before sleep --
-// just without showing that dialog.
-var confirmations = [...]struct {
-	title, button string
-	argv          []string
-}{
-	confirmRestart:  {"Restart now?", "Restart", []string{"xfce4-session-logout", "--reboot"}},
-	confirmShutDown: {"Shut down now?", "Shut Down", []string{"xfce4-session-logout", "--halt"}},
-	confirmLogOut:   {"Log out now?", "Log Out", []string{"xfce4-session-logout", "--logout"}},
 }
 
 func separator() menu.Row { return menu.Row{Kind: menu.Separator} }
@@ -43,11 +21,13 @@ func action(label string, click func()) menu.Row {
 }
 
 // mainRows is the menu itself. Apps are not in it: they are Cmd+Space, the
-// launcher's job.
+// launcher's job. Nothing asks twice: restart, shut down and log out happen
+// on the click, and xfce4-session-logout ends the session the way the
+// session's own dialog would.
 func mainRows(userName string, act actions) []menu.Row {
-	logOut := "Log Out…"
+	logOut := "Log Out"
 	if userName != "" {
-		logOut = "Log Out " + userName + "…"
+		logOut = "Log Out " + userName
 	}
 	return []menu.Row{
 		action("About This Mac", act.about),
@@ -56,25 +36,11 @@ func mainRows(userName string, act actions) []menu.Row {
 		action("Task Manager…", func() { act.run("xfce4-taskmanager") }),
 		separator(),
 		action("Sleep", func() { act.run("xfce4-session-logout", "--suspend") }),
-		action("Restart…", func() { act.confirm(confirmRestart) }),
-		action("Shut Down…", func() { act.confirm(confirmShutDown) }),
+		action("Restart", func() { act.run("xfce4-session-logout", "--reboot") }),
+		action("Shut Down", func() { act.run("xfce4-session-logout", "--halt") }),
 		separator(),
 		action("Lock Screen", func() { act.run("xflock4") }),
-		action(logOut, func() { act.confirm(confirmLogOut) }),
-	}
-}
-
-// confirmRows asks before an action that closes everything. Cancel, or a
-// click anywhere else, does nothing.
-func confirmRows(k confirmKind, act actions) []menu.Row {
-	c := confirmations[k]
-	argv := c.argv
-	return []menu.Row{
-		{Kind: menu.Header, Label: c.title},
-		{Kind: menu.Note, Label: "Open apps will be closed."},
-		separator(),
-		action(c.button, func() { act.run(argv...) }),
-		action("Cancel", func() {}),
+		action(logOut, func() { act.run("xfce4-session-logout", "--logout") }),
 	}
 }
 
