@@ -7,11 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xproto"
 	"github.com/jezek/xgbutil"
+
+	"github.com/godbus/dbus/v5"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/sfnt"
 
@@ -30,12 +34,25 @@ type Host struct {
 	Screen *xproto.ScreenInfo
 	Theme  *Theme
 
+	// AnchorY is the y the tray reported for the icon that was clicked,
+	// used to place the menu when the compositor publishes no work area.
+	// labwc sets no _NET_WORKAREA on the XWayland root -- it has no way to
+	// describe a layer-shell panel in EWMH terms -- so without this the
+	// menu opens at y=0, behind the panel it was summoned from.
+	//
+	// Zero means "not known", and the menu falls back to the top of the
+	// screen, which is what it did before.
+	AnchorY int
+
 	visual   visual
 	faces    *faces
 	escape   []xproto.Keycode
 	workarea xproto.Atom
 
 	popup *popup
+
+	// bus is the session bus, when the menu has been made Exclusive.
+	bus *dbus.Conn
 }
 
 // visual is a 32-bit TrueColor visual and the depth it belongs to.
@@ -109,6 +126,30 @@ func (h *Host) PointerX() (int, error) {
 	return int(reply.RootX), nil
 }
 
+// MenuX is where a menu opened from a tray icon should be centred, given
+// the x the tray reported with the click.
+//
+// Which source is right depends on the display server, and the wrong one
+// fails silently rather than loudly.
+//
+// On X11 the pointer is the better answer: it is on the icon at the moment
+// of the click, and XFCE's tray reports positions in half-size logical
+// pixels, which would put the menu half as far across the screen as it
+// belongs.
+//
+// Under Wayland the pointer is not merely worse, it is meaningless.
+// XWayland tracks the cursor only over XWayland surfaces, and the tray is
+// waybar -- a native Wayland surface -- so QueryPointer returns whatever
+// coordinate the pointer had when it last left an X window. It does not
+// fail; it just answers the wrong question, which is why the menus opened
+// nowhere near their icons. The tray's own figure is correct there.
+func (h *Host) MenuX(trayX int) (int, error) {
+	if os.Getenv("WAYLAND_DISPLAY") != "" && trayX > 0 {
+		return trayX, nil
+	}
+	return h.PointerX()
+}
+
 // keysymEscape is XK_Escape.
 const keysymEscape = 0xff1b
 
@@ -153,27 +194,65 @@ func (h *Host) menuTop() int {
 	reply, err := xwin.GetProperty(h.Conn, h.Screen.Root, h.workarea, "_NET_WORKAREA")
 	switch {
 	case errors.Is(err, xwin.ErrPropUnset):
-		// No window manager, or one that reserves nothing for panels.
-		return 0
+		// No window manager, one that reserves nothing for panels -- or
+		// labwc, which cannot express a layer-shell panel as EWMH and so
+		// publishes no work area at all.
+		return h.anchorTop()
 	case err != nil:
-		log.Printf("work area: %v; placing the menu at the top of the screen", err)
-		return 0
+		log.Printf("work area: %v; placing the menu below the tray icon", err)
+		return h.anchorTop()
 	}
 	vals, err := xwin.DecodeCard32s(reply)
 	if err != nil {
-		log.Printf("_NET_WORKAREA: %v; placing the menu at the top of the screen", err)
-		return 0
+		log.Printf("_NET_WORKAREA: %v; placing the menu below the tray icon", err)
+		return h.anchorTop()
 	}
 	if len(vals) < 4 {
-		log.Printf("_NET_WORKAREA has %d values, want at least 4; placing the menu at the top of the screen", len(vals))
-		return 0
+		log.Printf("_NET_WORKAREA has %d values, want at least 4; placing the menu below the tray icon", len(vals))
+		return h.anchorTop()
 	}
 	top := int(vals[1])
 	if limit := int(h.Screen.HeightInPixels) / 2; top > limit {
-		log.Printf("_NET_WORKAREA starts at y=%d, more than half way down; placing the menu at the top of the screen", top)
-		return 0
+		log.Printf("_NET_WORKAREA starts at y=%d, more than half way down; placing the menu below the tray icon", top)
+		return h.anchorTop()
 	}
 	return top
+}
+
+// anchorTop is the fallback for menuTop: just below the panel the menu was
+// summoned from, when the window manager publishes no work area.
+//
+// The tray's y is not the panel's height. waybar reports where the pointer
+// was, not the icon's rectangle -- measured here as 17, 21, 22 and 23 for
+// clicks on the same icon in a bar 28 pixels tall -- so using it directly
+// opens the menu a few pixels inside the bar, over the icons.
+//
+// Nothing on the system will say how tall the panel is. labwc publishes no
+// _NET_WORKAREA, and a layer-shell surface's geometry and exclusive zone
+// are not visible to other clients at all. So it is told:
+// OSXFLOW_PANEL_HEIGHT, set beside the panel's own height in the session's
+// autostart. Unset, the tray's y is still a better guess than zero.
+func (h *Host) anchorTop() int {
+	top := h.AnchorY
+	if p := panelHeight(); p > top {
+		top = p
+	}
+	// Only a top panel is handled. A y past halfway down is a bottom panel
+	// or a bad figure; either way the top of the screen is the safer guess
+	// than a menu hanging off the bottom.
+	if top > 0 && top < int(h.Screen.HeightInPixels)/2 {
+		return top
+	}
+	return 0
+}
+
+// panelHeight is OSXFLOW_PANEL_HEIGHT in pixels, or 0 when unset or junk.
+func panelHeight() int {
+	v, err := strconv.Atoi(os.Getenv("OSXFLOW_PANEL_HEIGHT"))
+	if err != nil || v < 0 {
+		return 0
+	}
+	return v
 }
 
 // Window is an override-redirect, translucent window with a surface to

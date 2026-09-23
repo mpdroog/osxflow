@@ -8,6 +8,7 @@ import (
 
 	"github.com/mpdroog/osxflow/internal/desktop"
 	"github.com/mpdroog/osxflow/internal/launch"
+	"github.com/mpdroog/osxflow/internal/xwin"
 )
 
 // The -windows table names the three expected reasons a window has no
@@ -70,4 +71,75 @@ func TestFindApp(t *testing.T) {
 	if _, ok := findApp(nil, "anything"); ok {
 		t.Error("findApp matched against an empty list")
 	}
+}
+
+// The window the keyboard goes back to when the launcher is dismissed. The
+// list is bottom-to-top, so the answer is the last entry -- but not the
+// desktop furniture, which is listed there too.
+func TestFocusedWindow(t *testing.T) {
+	tests := []struct {
+		name string
+		list []xwin.Window
+		want uint32
+	}{
+		{
+			name: "topmost of several",
+			list: []xwin.Window{{ID: 1}, {ID: 2}, {ID: 3}},
+			want: 3,
+		},
+		{
+			name: "the panel on top does not count",
+			list: []xwin.Window{{ID: 1}, {ID: 2}, {ID: 3, Type: "DOCK"}},
+			want: 2,
+		},
+		{
+			name: "nor does the wallpaper, or anything hiding from the taskbar",
+			list: []xwin.Window{{ID: 1}, {ID: 2, SkipTaskbar: true}, {ID: 3, Type: "DESKTOP"}},
+			want: 1,
+		},
+		{
+			name: "a dialog is where you were typing",
+			list: []xwin.Window{{ID: 1}, {ID: 2, Type: "DIALOG"}},
+			want: 2,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := focusedWindow(&xwin.Fake{List: tc.list})
+			if !ok {
+				t.Fatalf("found nothing, want 0x%x", tc.want)
+			}
+			if got.ID != tc.want {
+				t.Errorf("got 0x%x, want 0x%x", got.ID, tc.want)
+			}
+		})
+	}
+
+	// Nothing to hand the keyboard to, and no reason to fail over it.
+	for _, tc := range []struct {
+		name   string
+		server *xwin.Fake
+	}{
+		{"an empty desktop", &xwin.Fake{}},
+		{"nothing but furniture", &xwin.Fake{List: []xwin.Window{{ID: 1, Type: "DOCK"}}}},
+		{"a display server that will not say", &xwin.Fake{Err: errors.New("no client list")}},
+	} {
+		if _, ok := focusedWindow(tc.server); ok {
+			t.Errorf("%s: found a window to focus", tc.name)
+		}
+	}
+}
+
+// Dismissing the launcher hands the keyboard back; launching something does
+// not, because the thing that was launched has it.
+func TestRestoreFocusActivatesTheWindow(t *testing.T) {
+	server := &xwin.Fake{}
+	restoreFocus(server, xwin.Window{ID: 42})
+	if len(server.Activated) != 1 || server.Activated[0] != 42 {
+		t.Errorf("activated %v, want [42]", server.Activated)
+	}
+
+	// A window that has closed in the meantime is logged, not fatal.
+	failing := &xwin.Fake{ActivateErr: errors.New("no such window")}
+	restoreFocus(failing, xwin.Window{ID: 42})
 }

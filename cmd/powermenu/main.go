@@ -384,7 +384,8 @@ func (a *app) clicked(c sni.Click) {
 		a.stopPoll()
 		return
 	}
-	x, err := a.host.PointerX()
+	a.host.AnchorY = c.Y
+	x, err := a.host.MenuX(c.X)
 	if err != nil {
 		log.Printf("%v; using the tray's position %d", err, c.X)
 		x = c.X

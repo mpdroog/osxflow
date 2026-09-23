@@ -13,6 +13,15 @@ func TestX11Integration(t *testing.T) {
 	if os.Getenv("DISPLAY") == "" {
 		t.Skip("no DISPLAY; skipping the X11 integration test")
 	}
+	// A DISPLAY under a Wayland compositor is XWayland, where this test
+	// cannot pass and its failure would mean nothing: labwc never sets
+	// _NET_CLIENT_LIST on the XWayland root, because XWayland cannot see
+	// Wayland-native windows. That absence is the whole reason wayland.go
+	// exists; TestLiveCompositor in internal/wl is the equivalent check
+	// for a Wayland session.
+	if os.Getenv("WAYLAND_DISPLAY") != "" {
+		t.Skip("Wayland session: DISPLAY is XWayland, which has no _NET_CLIENT_LIST")
+	}
 	server, err := NewX11()
 	if err != nil {
 		t.Skipf("cannot connect to X: %v", err)

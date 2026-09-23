@@ -21,6 +21,7 @@ import (
 	"github.com/mpdroog/osxflow/internal/desktop"
 	"github.com/mpdroog/osxflow/internal/errlog"
 	"github.com/mpdroog/osxflow/internal/search"
+	"github.com/mpdroog/osxflow/internal/xmon"
 )
 
 // OpenFunc is called when the user accepts an application. It is given the
@@ -34,8 +35,12 @@ type OpenFunc func(app *desktop.App, query string) error
 
 // Run shows the launcher. scaleOverride forces a display scale; pass 0 to
 // detect one. ranker may be nil.
-func Run(apps []desktop.App, onOpen OpenFunc, scaleOverride float64, ranker search.Ranker) (err error) {
-	u, err := newUI(apps, onOpen, scaleOverride, ranker)
+//
+// monitor is the connector name of the monitor to open on ("DP-8"), which
+// the caller gets from the display server as the one the user is working
+// on. Pass "" to fall back to the monitor under the pointer.
+func Run(apps []desktop.App, onOpen OpenFunc, scaleOverride float64, ranker search.Ranker, monitor string) (err error) {
+	u, err := newUI(apps, onOpen, scaleOverride, ranker, monitor)
 	if err != nil {
 		return err
 	}
@@ -64,6 +69,10 @@ type ui struct {
 	open  OpenFunc
 	mt    *metrics
 
+	// monitor is the connector name to open on, or "" for the monitor
+	// under the pointer. See Run.
+	monitor string
+
 	// status replaces the result list when set, to report a failure the
 	// user has to see.
 	status string
@@ -83,7 +92,7 @@ type ui struct {
 	connClosed bool
 }
 
-func newUI(apps []desktop.App, onOpen OpenFunc, scaleOverride float64, ranker search.Ranker) (*ui, error) {
+func newUI(apps []desktop.App, onOpen OpenFunc, scaleOverride float64, ranker search.Ranker, monitor string) (*ui, error) {
 	X, err := xgbutil.NewConn()
 	if err != nil {
 		return nil, fmt.Errorf("connecting to X display: %w", err)
@@ -106,12 +115,13 @@ func newUI(apps []desktop.App, onOpen OpenFunc, scaleOverride float64, ranker se
 	}
 
 	u := &ui{
-		X:     X,
-		conn:  X.Conn(),
-		faces: faces,
-		mt:    mt,
-		model: NewModel(apps, visibleRows, ranker),
-		open:  onOpen,
+		X:       X,
+		conn:    X.Conn(),
+		faces:   faces,
+		mt:      mt,
+		model:   NewModel(apps, visibleRows, ranker),
+		open:    onOpen,
+		monitor: monitor,
 	}
 	if err := u.createWindow(); err != nil {
 		// Whatever part of the window was created goes with the
@@ -130,8 +140,20 @@ func (u *ui) createWindow() error {
 	// Horizontally centred, and a quarter of the way down rather than
 	// vertically centred: a panel in the exact middle of the screen sits
 	// lower than it looks like it should.
-	x := (int(screen.WidthInPixels) - u.mt.windowWidth) / 2
-	y := int(screen.HeightInPixels) / 4
+	//
+	// Centred on one monitor, not on the X screen. The screen is the union
+	// of all of them, so on this two-head Mac Pro its centre is the seam
+	// between the displays and the launcher opened split across both,
+	// half on each, unreadable.
+	//
+	// Which monitor comes from the caller, because it is the window with
+	// the keyboard that decides it and this package cannot see one. Only
+	// when the caller does not know does it fall back to the pointer,
+	// which is a guess: the mouse sits where it was last used, which on
+	// two monitors is regularly not the one being typed on.
+	mon := xmon.For(u.conn, screen, u.monitor)
+	x := mon.X + (mon.W-u.mt.windowWidth)/2
+	y := mon.Y + mon.H/4
 
 	win, err := xproto.NewWindowId(u.conn)
 	if err != nil {
@@ -147,8 +169,20 @@ func (u *ui) createWindow() error {
 		1, // override-redirect: keep the window manager out of this
 		uint32(xproto.EventMaskExposure | xproto.EventMaskKeyPress | xproto.EventMaskButtonPress),
 	}
+	// Created off the right-hand edge of the screen rather than where it
+	// belongs, and moved into place at the end of this function, once the
+	// keyboard is actually ours.
+	//
+	// X will not grant a grab on a window that is not viewable, so the
+	// window has to be mapped before the grab -- and the grab is the part
+	// that can fail. Mapped in place, a failure leaves a black,
+	// never-painted rectangle sitting on the screen for the whole of the
+	// retry and then vanishing, which is what a Cmd+Space that "shows a
+	// black box" actually is. Parked, the same failure costs nothing
+	// visible: the window is mapped onto no monitor at all.
+	parkedX := int(screen.WidthInPixels)
 	err = xproto.CreateWindowChecked(u.conn, screen.RootDepth, win, screen.Root,
-		i16(x), i16(y), u16(u.mt.windowWidth), u16(u.mt.windowHeight), 0,
+		i16(parkedX), 0, u16(u.mt.windowWidth), u16(u.mt.windowHeight), 0,
 		xproto.WindowClassInputOutput, screen.RootVisual, mask, values).Check()
 	if err != nil {
 		return fmt.Errorf("creating the window: %w", err)
@@ -174,6 +208,16 @@ func (u *ui) createWindow() error {
 		return err
 	}
 	u.grabPointer()
+
+	// The keyboard is ours, so there will be a launcher: show it. The
+	// first paint is loop's, one round trip away, and a compositor does
+	// not present a surface until the X server has committed a buffer for
+	// it, so nothing blank appears in between.
+	if err := xproto.ConfigureWindowChecked(u.conn, win,
+		xproto.ConfigWindowX|xproto.ConfigWindowY,
+		[]uint32{u32(x), u32(y)}).Check(); err != nil {
+		return fmt.Errorf("moving the window onto the screen: %w", err)
+	}
 	return nil
 }
 

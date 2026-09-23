@@ -83,6 +83,21 @@ type Server interface {
 	// ask.
 	Activate(id uint32) error
 
+	// ActiveMonitor names the monitor the user is working on: the
+	// connector ("DP-8") of the monitor holding the window that has the
+	// keyboard, or had it last.
+	//
+	// It exists because the pointer cannot answer it. Anything summoned by
+	// a hotkey has to appear on the screen the user is typing on, and the
+	// mouse is wherever it was left -- on the other monitor as often as
+	// not, and under XWayland at a position that stopped being updated
+	// when the cursor last left an X11 window.
+	//
+	// An empty name is not a failure: it means nothing is focused, or the
+	// display server will not say which monitor it is on. A caller should
+	// fall back to whatever it did before.
+	ActiveMonitor() (string, error)
+
 	// Close releases the display connection.
 	Close() error
 }
@@ -95,6 +110,10 @@ type Fake struct {
 
 	// ActivateErr, when set, is returned by Activate.
 	ActivateErr error
+
+	// Monitor and MonitorErr are what ActiveMonitor answers.
+	Monitor    string
+	MonitorErr error
 
 	List []Window
 
@@ -117,6 +136,10 @@ func (f *Fake) Activate(id uint32) error {
 	}
 	f.Activated = append(f.Activated, id)
 	return nil
+}
+
+func (f *Fake) ActiveMonitor() (string, error) {
+	return f.Monitor, f.MonitorErr
 }
 
 func (f *Fake) Close() error {

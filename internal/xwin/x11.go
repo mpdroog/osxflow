@@ -15,6 +15,8 @@ import (
 	"github.com/jezek/xgb/xproto"
 	"github.com/jezek/xgbutil"
 	"github.com/jezek/xgbutil/ewmh"
+
+	"github.com/mpdroog/osxflow/internal/xmon"
 )
 
 // propReader is the part of Props that describe needs, split out so the
@@ -363,6 +365,67 @@ func (x *x11) Activate(id uint32) error {
 		return fmt.Errorf("activating window 0x%x: %w", id, err)
 	}
 	return nil
+}
+
+// ActiveMonitor names the monitor holding the focused window.
+//
+// _NET_ACTIVE_WINDOW rather than the pointer, and the window's centre
+// rather than its origin: a window straddling two monitors belongs to the
+// one showing most of it, which is the one its middle is on.
+//
+// Every way of not knowing answers "" and no error, because they are all
+// ordinary. Nothing is focused on a freshly started desktop; the focused
+// window may be destroyed between the two requests; a window manager need
+// not keep the property at all. Only X itself failing is an error.
+func (x *x11) ActiveMonitor() (string, error) {
+	ids, err := x.windowList("_NET_ACTIVE_WINDOW")
+	if errors.Is(err, ErrPropUnset) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if len(ids) == 0 || ids[0] == 0 {
+		return "", nil // None: the desktop itself has the keyboard
+	}
+	cx, cy, err := x.centre(ids[0])
+	if errors.Is(err, ErrWindowGone) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	conn := x.conn.Conn()
+	m, ok := xmon.Containing(xmon.All(conn, xproto.Setup(conn).DefaultScreen(conn)), cx, cy)
+	if !ok {
+		return "", nil // off the side of every monitor, which RandR allows
+	}
+	return m.Name, nil
+}
+
+// centre is the middle of a window, in root coordinates.
+//
+// The geometry a window reports is relative to its parent, which under a
+// reparenting window manager is the frame and not the root, so the origin
+// has to be translated rather than read. A window destroyed in between
+// comes back wrapping ErrWindowGone.
+func (x *x11) centre(win xproto.Window) (int, int, error) {
+	conn := x.conn.Conn()
+	geom, err := xproto.GetGeometry(conn, xproto.Drawable(win)).Reply()
+	if err != nil {
+		return 0, 0, replyError("the geometry", win, err)
+	}
+	if geom == nil {
+		return 0, 0, fmt.Errorf("reading the geometry of window 0x%x: no reply from the X server", win)
+	}
+	at, err := xproto.TranslateCoordinates(conn, win, x.root, 0, 0).Reply()
+	if err != nil {
+		return 0, 0, replyError("the position", win, err)
+	}
+	if at == nil {
+		return 0, 0, fmt.Errorf("reading the position of window 0x%x: no reply from the X server", win)
+	}
+	return int(at.DstX) + int(geom.Width)/2, int(at.DstY) + int(geom.Height)/2, nil
 }
 
 func (x *x11) Close() error {

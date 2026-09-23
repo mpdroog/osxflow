@@ -4,8 +4,7 @@ The system menu at the left end of the panel, the way macOS has one under
 the Apple logo:
 
 - **About This Linux** -- model, system, kernel, memory and uptime.
-- **System Settings…** -- xfce4-settings-manager.
-- **Task Manager…** -- xfce4-taskmanager.
+- **Task Manager…** -- `top` in a foot window.
 - **Sleep**, **Restart**, **Shut Down** -- each one happens on the click.
 - **Lock Screen** and **Log Out**.
 
@@ -15,16 +14,37 @@ Apps are not in it: finding and starting them is the launcher's job
 ## How it runs
 
 Nothing stays running. [menubar](../menubar/README.md) starts macmenu when
-Tux is clicked (under xfce4-panel, a panel launcher did);
-it opens under the pointer, does what was chosen, and exits. Clicking the
-Tux again while the menu is open closes it: the second macmenu finds
-the first on the session bus (`org.osxflow.MacMenu`) and tells it to close.
+Tux is clicked (under waybar, a custom module does; under xfce4-panel, a
+panel launcher did); it opens under the pointer, does what was chosen, and
+exits. Clicking the Tux again while the menu is open closes it: the second
+macmenu finds the first on the session bus (`org.osxflow.MacMenu`) and
+tells it to close.
 
-Sleep, restart, shut down and log out go through `xfce4-session-logout`,
-so they behave as the session's own dialog would -- the session is saved,
-and the screen is locked before sleeping -- only without that dialog, and
-without one of its own: a row here does what it says straight away.
-Locking is `xflock4`, which uses whichever locker XFCE is set up with.
+It is **not** a tray item and must never be started from the session's
+autostart: backgrounded at login it opens its menu once, against nobody,
+and exits.
+
+## What the rows run
+
+On Alpine there is no XFCE and no elogind, so none of what this menu was
+first written against exists here -- `xfce4-session-logout`, `xflock4`,
+`xfce4-settings-manager`, `xfce4-taskmanager`. A row whose program is
+missing is the worst kind of dead: the menu closes and nothing happens,
+with the error going to a stderr nobody reads. So the rows are:
+
+| Row | Command |
+| --- | --- |
+| Task Manager… | `foot -T "Task Manager" top` |
+| Sleep | `swaylock -f -c 000000 && doas /usr/local/sbin/osxflow-suspend` |
+| Restart | `doas /sbin/reboot` |
+| Shut Down | `doas /sbin/poweroff` |
+| Lock Screen | `swaylock -f -c 000000` |
+| Log Out | `labwc --exit` |
+
+Sleep locks before suspending, the way the XFCE dialog did; `swaylock -f`
+returns once the screen is actually covered, so the lock is up before the
+machine goes down. There is no System Settings row: nothing on Alpine
+answers to that.
 
 ## Installing
 
@@ -33,34 +53,61 @@ Locking is `xflock4`, which uses whichever locker XFCE is set up with.
     make macmenu
     install -m755 bin/macmenu ~/.local/bin/macmenu
 
-**2. With menubar, nothing more: Tux runs macmenu from beside menubar's
-own binary.** Under xfce4-panel instead, add a launcher for it at the left
-end of the panel. Pick a plugin
-id that is not taken (`xfconf-query -c xfce4-panel -l | grep plugin-`),
-15 here (1-14 were taken), give it a launcher item, and put its id first in the panel's list.
-Its icon is [macmenu.svg](macmenu.svg), Tux's head (from Simple Icons, CC0)
-where macOS has its apple, named by absolute path:
+**2. Let the three power rows work.** They need root, and this machine has
+no elogind to ask, so they go through doas. As root:
 
-    install -Dm644 cmd/macmenu/macmenu.svg ~/.local/share/icons/hicolor/scalable/apps/macmenu.svg
-    mkdir -p ~/.config/xfce4/panel/launcher-15
-    printf '[Desktop Entry]\nType=Application\nName=macmenu\nExec=%s/.local/bin/macmenu\nIcon=%s/.local/share/icons/hicolor/scalable/apps/macmenu.svg\n' "$HOME" "$HOME" \
-      > ~/.config/xfce4/panel/launcher-15/macmenu.desktop
-    xfconf-query -c xfce4-panel -p /plugins/plugin-15 -n -t string -s launcher
-    xfconf-query -c xfce4-panel -p /plugins/plugin-15/items -n --force-array -t string -s macmenu.desktop
-    xfconf-query -c xfce4-panel -p /panels/panel-1/plugin-ids --force-array \
-      -t int -s 15 -t int -s 7 -t int -s 8 -t int -s 10 -t int -s 13
-    xfce4-panel -r
+    install -m644 files/doas/30-osxflow-power.conf /etc/doas.d/30-osxflow-power.conf
+    mkdir -p /usr/local/sbin
+    install -m755 files/doas/osxflow-suspend /usr/local/sbin/osxflow-suspend
 
-That list leaves out Whisker Menu (plugin 1); keep `-t int -s 1` in it to
-have both while trying macmenu out.
+Alpine's `/usr/local` holds only `bin`, so `/usr/local/sbin` has to be made
+first or the second `install` fails with "No such file or directory". Keep
+that path: the rule below names the helper in full, and installing it
+somewhere else leaves Sleep quietly doing nothing.
+
+The rule names all three commands in full, so it grants those and nothing
+else -- check it before and after installing with:
+
+    doas -C files/doas/30-osxflow-power.conf -u mp /sbin/poweroff   # permit nopass
+    doas -C files/doas/30-osxflow-power.conf -u mp /bin/sh          # deny
+
+Without this the other rows still work; Sleep, Restart and Shut Down do
+nothing.
+
+**3. Add the button to the bar.** With
+[menubar](../menubar/README.md) there is nothing to do: Tux runs macmenu
+from beside menubar's own binary. Under waybar, put it first in
+`modules-left`, where macOS keeps the Apple menu:
+
+    "modules-left": ["custom/macmenu", "wlr/taskbar"],
+
+    "custom/macmenu": {
+        "format": "",
+        "tooltip": false,
+        "on-click": "/home/mp/.local/bin/macmenu"
+    },
+
+The icon is Tux's head at U+F17C, a Nerd Font glyph, not [macmenu.svg](macmenu.svg):
+waybar draws images through gdk-pixbuf, and this machine has only the xpm
+loader -- no librsvg -- so an SVG on the bar draws nothing at all, silently.
+The bar's own font (FontAwesome, which resolves to Noto Sans here) has no
+glyph there either, so `~/.config/waybar/style.css` names one that does:
+
+    #custom-macmenu {
+        font-family: "JetBrainsMono Nerd Font", "JetBrainsMonoNL Nerd Font", monospace;
+        font-size: 15px;
+        padding: 0 10px;
+    }
+
+waybar must be started with `OSXFLOW_PANEL_HEIGHT` set to its real height
+(the session's autostart does this), because macmenu inherits waybar's
+environment and needs it to drop the menu below the bar rather than a few
+pixels inside it.
 
 ### Uninstalling
 
-Put Whisker Menu's id back in place of 15 and restart the panel:
-
-    xfconf-query -c xfce4-panel -p /panels/panel-1/plugin-ids --force-array \
-      -t int -s 1 -t int -s 7 -t int -s 8 -t int -s 10 -t int -s 13
-    xfce4-panel -r
+Take `"custom/macmenu"` back out of `modules-left`, and remove
+`/etc/doas.d/30-osxflow-power.conf` and `/usr/local/sbin/osxflow-suspend`.
 
 ## Flags
 

@@ -46,8 +46,15 @@ func start() error {
 	var (
 		scaleFlag = flag.Float64("scale", 0, "display scale factor (0 detects it)")
 		verbose   = flag.Bool("v", false, "log registrations, clicks, scrolls and icon changes")
+		keyFlag   = flag.String("key", "", "hand a volume key to the running soundmenu and exit: raise, lower, mute or micmute")
 	)
 	flag.Parse()
+
+	// Client mode. Used where the compositor owns the keyboard and this
+	// process cannot grab the volume keys itself -- see ipc.go.
+	if *keyFlag != "" {
+		return sendKey(*keyFlag)
+	}
 
 	a, err := newApp(*scaleFlag, *verbose)
 	if err != nil {
@@ -89,14 +96,22 @@ type app struct {
 	keys map[xproto.Keycode]keyAction
 	osd  osd
 
-	session   *dbus.Conn
-	sound     *audio.Client
-	soundC    <-chan struct{}
-	players   *mpris.Client
-	playersC  <-chan struct{}
-	item      *sni.Item
-	reconnect *time.Timer
-	retryC    <-chan time.Time
+	// keyC carries volume keys handed over the session bus by another
+	// copy of this binary, for compositors that will not give up a global
+	// grab. Buffered so a held-down key cannot block the bus.
+	keyC chan keyAction
+
+	session *dbus.Conn
+
+	// closeMenus carries "another osxflow menu opened"; see menu.Exclusive.
+	closeMenus <-chan struct{}
+	sound      *audio.Client
+	soundC     <-chan struct{}
+	players    *mpris.Client
+	playersC   <-chan struct{}
+	item       *sni.Item
+	reconnect  *time.Timer
+	retryC     <-chan time.Time
 
 	view view
 	icon iconState
@@ -121,6 +136,7 @@ func newApp(scaleOverride float64, verbose bool) (*app, error) {
 		conn:    xu.Conn(),
 		lim:     &errlog.Limiter{Burst: logBurst, Per: logEvery},
 		verbose: verbose,
+		keyC:    make(chan keyAction, 8),
 	}
 	abandon := func(err error) (*app, error) {
 		if closeErr := a.close(); closeErr != nil {
@@ -138,6 +154,18 @@ func newApp(scaleOverride float64, verbose bool) (*app, error) {
 	if a.session, err = dbus.ConnectSessionBus(); err != nil {
 		return abandon(fmt.Errorf("connecting to the session bus: %w", err))
 	}
+	// The compositor route for the volume keys. Not fatal: on X11 the grab
+	// above is what carries them, and there this is only a second way in.
+	if ipcErr := a.exportIPC(); ipcErr != nil {
+		log.Printf("volume keys over D-Bus unavailable: %v", ipcErr)
+	}
+
+	// One menu at a time across all of them. Not fatal: without it they
+	// merely overlap, as they did before.
+	if a.closeMenus, err = a.host.Exclusive(a.session); err != nil {
+		log.Printf("menu exclusivity unavailable: %v", err)
+	}
+
 	a.players = mpris.New(a.session)
 	if a.playersC, err = a.players.Watch(); err != nil {
 		// The menu still shows a player when it opens; it just does not
@@ -210,6 +238,14 @@ func (a *app) run() error {
 
 		case c := <-a.item.Clicks():
 			a.clicked(c)
+
+		case <-a.closeMenus:
+			// Another osxflow menu opened.
+			a.host.Close()
+
+		case k := <-a.keyC:
+			// Exactly what a grabbed key press does, including the overlay.
+			a.pressed(k)
 
 		case err := <-a.item.Registrations():
 			switch {
@@ -350,7 +386,8 @@ func (a *app) clicked(c sni.Click) {
 		a.host.Close()
 		return
 	}
-	x, err := a.host.PointerX()
+	a.host.AnchorY = c.Y
+	x, err := a.host.MenuX(c.X)
 	if err != nil {
 		log.Printf("%v; using the tray's position %d", err, c.X)
 		x = c.X

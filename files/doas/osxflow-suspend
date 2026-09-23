@@ -1,0 +1,11 @@
+#!/bin/sh
+# /usr/local/sbin/osxflow-suspend -- suspend to RAM.
+#
+# macmenu's Sleep row runs this through doas. It exists as a file of its
+# own because doas grants whole commands: there is no way to permit the
+# single write below without permitting a root shell to do anything else
+# too.
+#
+# macmenu locks the screen before calling this; nothing here should.
+set -eu
+printf 'mem\n' > /sys/power/state

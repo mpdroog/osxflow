@@ -16,10 +16,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/godbus/dbus/v5"
+
 	"github.com/mpdroog/osxflow/internal/calc"
 	"github.com/mpdroog/osxflow/internal/desktop"
 	"github.com/mpdroog/osxflow/internal/frecency"
 	"github.com/mpdroog/osxflow/internal/launch"
+	"github.com/mpdroog/osxflow/internal/menu"
 	"github.com/mpdroog/osxflow/internal/search"
 	"github.com/mpdroog/osxflow/internal/ui"
 	"github.com/mpdroog/osxflow/internal/xwin"
@@ -35,6 +38,7 @@ func main() {
 		list    = flag.Bool("list", false, "list the applications that were found and exit")
 		windows = flag.Bool("windows", false, "list the open windows as the matcher sees them and exit")
 		match   = flag.Bool("match", false, "show which application each open window was matched to and exit")
+		where   = flag.Bool("where", false, "show which monitor the launcher would open on and exit")
 		open    = flag.String("open", "", "open the named application (focus it if running) and exit")
 		eval    = flag.String("eval", "", "evaluate an expression and exit")
 		query   = flag.String("search", "", "show how a query ranks against the installed applications and exit")
@@ -44,12 +48,12 @@ func main() {
 	)
 	flag.Parse()
 
-	if err := run(*list, *windows, *match, *open, *eval, *query, *scale, *noLearn, *forget); err != nil {
+	if err := run(*list, *windows, *match, *where, *open, *eval, *query, *scale, *noLearn, *forget); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(list, windows, match bool, open, eval, query string, scale float64, noLearn bool, forget string) error {
+func run(list, windows, match, where bool, open, eval, query string, scale float64, noLearn bool, forget string) error {
 	if eval != "" {
 		v, err := calc.Eval(eval)
 		if err != nil {
@@ -98,7 +102,7 @@ func run(list, windows, match bool, open, eval, query string, scale float64, noL
 		return nil
 	}
 
-	server, err := xwin.NewX11()
+	server, err := xwin.NewServer()
 	if err != nil {
 		return err
 	}
@@ -115,18 +119,54 @@ func run(list, windows, match bool, open, eval, query string, scale float64, noL
 		return printWindows(server)
 	case match:
 		return printMatches(apps, server)
+	case where:
+		return printWhere(server)
 	case open != "":
 		return openApp(apps, server, open)
 	}
 
 	// No flags: show the launcher. Everything above is a way to inspect
 	// what it would do without it appearing on screen.
+	//
+	// Both of these are asked before the window exists, because opening it
+	// is what makes them unanswerable: it takes the keyboard, and then
+	// nothing on the desktop is the focused window any more.
+	monitor, monErr := server.ActiveMonitor()
+	if monErr != nil {
+		// Not fatal: the launcher opens on the monitor under the pointer,
+		// which is where it always used to open.
+		log.Printf("which monitor to open on: %v", monErr)
+	}
+	previous, hadPrevious := focusedWindow(server)
+
+	// Ask any open tray menu to close, before the window exists and well
+	// before the grab.
+	//
+	// An open menu holds the X keyboard and the X pointer, so that a click
+	// anywhere dismisses it. On X11 that click always arrived and the
+	// grabs never outlived the menu. Under Wayland the tray is waybar, a
+	// native Wayland surface, and a click on it never reaches the X server
+	// -- so the menu is never told, stays open, and keeps both grabs.
+	//
+	// What that looks like from here is Cmd+Space doing nothing: the
+	// launcher's GrabKeyboard fails with AlreadyGrabbed for the whole of
+	// its retry and the launcher exits. The dock loses its hover at the
+	// same time and for the same reason, its reveal strips being X windows
+	// whose pointer events the grab swallows.
+	//
+	// Not fatal, and deliberately not waited on: the grab retry in
+	// internal/ui is the wait, and it is long enough for a menu to hear
+	// this and let go.
+	closeMenus()
+
 	l := launch.New(server)
-	return ui.Run(apps, func(app *desktop.App, chosenFor string) error {
+	launched := false
+	err = ui.Run(apps, func(app *desktop.App, chosenFor string) error {
 		res, err := l.Open(app)
 		if err != nil {
 			return err // ui shows it and logs it; see ui.OpenFunc
 		}
+		launched = true
 		if res.Focused {
 			log.Printf("focused 0x%x of %s (matched by %s)", res.Window.ID, app.Name, res.Confidence)
 		} else {
@@ -143,7 +183,79 @@ func run(list, windows, match bool, open, eval, query string, scale float64, noL
 			}
 		}
 		return nil
-	}, scale, ranker)
+	}, scale, ranker, monitor)
+
+	// Hand the keyboard back, unless something was launched -- in which
+	// case it has the keyboard, and that is the point.
+	if !launched && hadPrevious {
+		restoreFocus(server, previous)
+	}
+	return err
+}
+
+// focusedWindow is the window the user was working in: the topmost of the
+// ones a taskbar would list, which under both display servers is the one
+// that has the keyboard or had it last.
+//
+// A failure to find it is not worth a word to the user. It costs the
+// keyboard being handed back on the way out, and the desktop is no worse
+// off than it was before this was implemented.
+func focusedWindow(server xwin.Server) (xwin.Window, bool) {
+	wins, err := server.Windows()
+	if err != nil {
+		log.Printf("which window has the keyboard: %v", err)
+		return xwin.Window{}, false
+	}
+	// Listable skips the desktop furniture: the panel and the wallpaper are
+	// windows too, and handing the keyboard to one of those is no better
+	// than leaving it nowhere.
+	for i := len(wins) - 1; i >= 0; i-- {
+		if wins[i].Listable() {
+			return wins[i], true
+		}
+	}
+	return xwin.Window{}, false
+}
+
+// restoreFocus gives the keyboard back to the window that had it.
+//
+// This is needed because the launcher's window is override-redirect: no
+// window manager placed it, so none of them has any record of what was
+// focused before it appeared, and nothing puts the focus back when it
+// vanishes. Under labwc that is exactly what happens -- the launcher is
+// dismissed and the keyboard belongs to nothing at all, so the next thing
+// typed goes nowhere.
+//
+// A failure is logged and no more: the launcher has done what it was
+// opened for, and the user can click the window.
+func restoreFocus(server xwin.Server, win xwin.Window) {
+	if err := server.Activate(win.ID); err != nil {
+		log.Printf("handing the keyboard back to %s: %v", win.String(), err)
+	}
+}
+
+// printWhere shows the two things the launcher asks the desktop before it
+// opens: which monitor to appear on, and which window to hand the keyboard
+// back to when it closes. Both are invisible in the finished article, and
+// both are wrong in ways that are maddening to diagnose from the window
+// itself -- a launcher on the other screen looks like it never opened.
+func printWhere(server xwin.Server) error {
+	monitor, err := server.ActiveMonitor()
+	if err != nil {
+		return err
+	}
+	if monitor == "" {
+		fmt.Println("monitor: unknown, so the one under the pointer")
+	} else {
+		fmt.Printf("monitor: %s\n", monitor)
+	}
+	win, ok := focusedWindow(server)
+	if !ok {
+		fmt.Println("keyboard: nothing to hand it back to")
+		return nil
+	}
+	fmt.Printf("keyboard: %s\n", win.String())
+	return nil
 }
 
 // loadStore opens the usage memory, always returning a usable store even
@@ -285,4 +397,26 @@ func findApp(apps []desktop.App, query string) (*desktop.App, bool) {
 		}
 	}
 	return nil, false
+}
+
+// closeMenus asks the osxflow tray menus to close, over the session bus
+// channel they already use to close each other.
+//
+// Every failure here is logged and shrugged off. The launcher opening is
+// worth more than the reason a menu did not close, and when there is no
+// menu open -- which is nearly always -- none of this matters at all.
+func closeMenus() {
+	bus, err := dbus.ConnectSessionBus()
+	if err != nil {
+		log.Printf("asking the tray menus to close: %v", err)
+		return
+	}
+	defer func() {
+		if closeErr := bus.Close(); closeErr != nil {
+			log.Printf("closing the session bus: %v", closeErr)
+		}
+	}()
+	if err := menu.AnnounceOpened(bus); err != nil {
+		log.Printf("asking the tray menus to close: %v", err)
+	}
 }

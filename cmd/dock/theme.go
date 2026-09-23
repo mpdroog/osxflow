@@ -195,7 +195,7 @@ var (
 // "Firefox" and "Files". This is the one place the dock second-guesses the
 // system, and it is a list of five, for one user.
 var displayNames = map[string]string{
-	"firefox.desktop":                "Firefox",
+	"org.mozilla.firefox.desktop":    "Firefox",
 	"thunderbird.desktop":            "Thunderbird",
 	"thunar.desktop":                 "Files",
 	"com.mitchellh.ghostty.desktop":  "Ghostty",
@@ -208,7 +208,12 @@ var displayNames = map[string]string{
 // one machine.
 var pinnedIDs = []string{
 	"thunderbird.desktop",
-	"firefox.desktop",
+	// Firefox here is the flatpak, so the id is its app id and not the
+	// distro package's "firefox.desktop" that plank was pinned to on Mint.
+	// The old id matches nothing on this machine, so the pin was silently
+	// skipped and Firefox could only ever appear as a transient icon while
+	// it happened to be running.
+	"org.mozilla.firefox.desktop",
 	"com.mitchellh.ghostty.desktop",
 	"thunar.desktop",
 	"com.discordapp.Discord.desktop",

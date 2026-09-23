@@ -104,12 +104,23 @@ func (d *dockApp) createDockWindow(width, height, x, y int) error {
 	return nil
 }
 
-// createTriggerWindow makes the invisible strip along the bottom of the
-// screen that reveals the dock.
+// createTriggerWindow makes the invisible strip along the bottom of one
+// monitor that reveals the dock.
 //
-// It is InputOnly: it has no pixels at all, so it costs no memory in the
-// server and can never be drawn. Its only job is to turn "the pointer
-// reached the bottom edge" into an event.
+// It has pixels, and that is the whole point. The obvious implementation
+// is InputOnly -- no pixels at all, no memory in the server, can never be
+// drawn -- and that is what this was. It does not work under Wayland: an
+// X window with no pixels never becomes a Wayland surface, XWayland only
+// tracks the pointer over surfaces, and so the strip is never entered and
+// QueryPointer reports a coordinate frozen wherever the pointer last left
+// an X window. A fully transparent 32-bit window costs a few kilobytes,
+// is equally invisible, and is a real surface that receives the pointer on
+// both display servers.
+//
+// One is created per monitor. A single strip along the bottom of the X
+// screen -- the union of every monitor -- is only correct when they are
+// all the same height; here the shorter screen's own bottom row is 720px
+// above the union's, so its strip sat at a y the pointer could not reach.
 //
 // It reports the pointer leaving as well as arriving. The dock's own
 // window is narrower than the screen, so a reveal from a point off to
@@ -122,18 +133,23 @@ func (d *dockApp) createTriggerWindow(width, height, x, y int) error {
 	if err != nil {
 		return fmt.Errorf("allocating a window id: %w", err)
 	}
-	d.trigger = win
+	d.triggers = append(d.triggers, win)
 
-	// InputOnly windows accept neither a background nor a colormap; asking
-	// for either is a BadMatch.
-	mask := uint32(xproto.CwOverrideRedirect | xproto.CwEventMask)
+	// Same 32-bit visual and colormap as the dock window, for the same
+	// reason: a 32-bit window in a 24-bit parent needs its own colormap
+	// and a border pixel, and inheriting either is a BadMatch.
+	mask := uint32(xproto.CwBackPixel | xproto.CwBorderPixel |
+		xproto.CwOverrideRedirect | xproto.CwEventMask | xproto.CwColormap)
 	values := []uint32{
-		1,
+		0x00000000, // transparent: nothing is ever drawn here
+		0x00000000,
+		1, // override-redirect
 		uint32(xproto.EventMaskEnterWindow | xproto.EventMaskLeaveWindow),
+		uint32(d.colormap),
 	}
-	err = xproto.CreateWindowChecked(d.conn, 0, win, d.screen.Root,
+	err = xproto.CreateWindowChecked(d.conn, d.visual.depth, win, d.screen.Root,
 		geom.I16(x), geom.I16(y), geom.U16(width), geom.U16(height), 0,
-		xproto.WindowClassInputOnly, 0, mask, values).Check()
+		xproto.WindowClassInputOutput, d.visual.id, mask, values).Check()
 	if err != nil {
 		return fmt.Errorf("creating the reveal trigger: %w", err)
 	}

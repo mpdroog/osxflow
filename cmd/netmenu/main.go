@@ -71,9 +71,12 @@ type app struct {
 
 	sys     *dbus.Conn
 	session *dbus.Conn
-	nm      *netmgr.Client
-	changes <-chan struct{}
-	item    *sni.Item
+
+	// closeMenus carries "another osxflow menu opened"; see menu.Exclusive.
+	closeMenus <-chan struct{}
+	nm         *netmgr.Client
+	changes    <-chan struct{}
+	item       *sni.Item
 
 	state netmgr.State
 	icon  iconState
@@ -144,6 +147,12 @@ func newApp(scaleOverride float64, verbose bool) (*app, error) {
 	if a.session, err = dbus.ConnectSessionBus(); err != nil {
 		return abandon(fmt.Errorf("connecting to the session bus: %w", err))
 	}
+	// One menu at a time across all of them. Not fatal: without it they
+	// merely overlap, as they did before.
+	if a.closeMenus, err = a.host.Exclusive(a.session); err != nil {
+		log.Printf("menu exclusivity unavailable: %v", err)
+	}
+
 	a.icon, a.tip = iconFor(&a.state), tooltipFor(&a.state)
 	a.item, err = sni.Export(a.session, &sni.Options{
 		ID:       "osxflow-netmenu",
@@ -183,6 +192,10 @@ func (a *app) run() error {
 
 		case c := <-a.item.Clicks():
 			a.clicked(c)
+
+		case <-a.closeMenus:
+			// Another osxflow menu opened.
+			a.host.Close()
 
 		case err := <-a.item.Registrations():
 			switch {
@@ -265,7 +278,8 @@ func (a *app) clicked(c sni.Click) {
 		a.host.Close()
 		return
 	}
-	x, err := a.host.PointerX()
+	a.host.AnchorY = c.Y
+	x, err := a.host.MenuX(c.X)
 	if err != nil {
 		log.Printf("%v; using the tray's position %d", err, c.X)
 		x = c.X

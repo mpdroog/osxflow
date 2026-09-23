@@ -16,6 +16,7 @@ import (
 	"github.com/mpdroog/osxflow/internal/glyph"
 	"github.com/mpdroog/osxflow/internal/menu"
 	"github.com/mpdroog/osxflow/internal/paint"
+	"github.com/mpdroog/osxflow/internal/xmon"
 )
 
 type osdKind int
@@ -110,10 +111,16 @@ type osd struct {
 func (o *osd) show(h *menu.Host, v osdView) {
 	if o.win == nil {
 		size := int(baseOSD*h.Theme.Scale + 0.5)
-		sw, sh := int(h.Screen.WidthInPixels), int(h.Screen.HeightInPixels)
-		// Centred, three quarters of the way down: clear of the menus under
-		// the panel, and above where the dock slides up.
-		win, err := h.NewWindow((sw-size)/2, sh*3/4-size/2, size, size, "osxflow-osd",
+		// Centred on ONE monitor, three quarters of the way down: clear of
+		// the menus under the panel, and above where the dock slides up.
+		//
+		// The X screen is the union of every monitor, so centring in it put
+		// the overlay at the union's mid-point -- which on a two-head
+		// desktop is the gap between the screens. It appeared split down
+		// the bezel, half on each, which reads as not appearing at all.
+		// The monitor under the pointer is the one being looked at.
+		m := xmon.Active(h.Conn, h.Screen)
+		win, err := h.NewWindow(m.X+(m.W-size)/2, m.Y+m.H*3/4-size/2, size, size, "osxflow-osd",
 			uint32(xproto.EventMaskExposure))
 		if err != nil {
 			log.Printf("volume overlay: %v", err)

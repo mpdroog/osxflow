@@ -35,19 +35,18 @@ func labels(rows []menu.Row) string {
 func TestMainRows(t *testing.T) {
 	f := &fakeActions{}
 	rows := mainRows("MP Droog", f)
-	want := "About This Linux|--|System Settings…|Task Manager…|--|Sleep|Restart|Shut Down|--|Lock Screen|Log Out MP Droog"
+	want := "About This Linux|--|Task Manager…|--|Sleep|Restart|Shut Down|--|Lock Screen|Log Out MP Droog"
 	if got := labels(rows); got != want {
 		t.Fatalf("rows:\n got %s\nwant %s", got, want)
 	}
 	for i, want := range map[int]string{
-		0:  "about",
-		2:  "run xfce4-settings-manager",
-		3:  "run xfce4-taskmanager",
-		5:  "run xfce4-session-logout --suspend",
-		6:  "run xfce4-session-logout --reboot",
-		7:  "run xfce4-session-logout --halt",
-		9:  "run xflock4",
-		10: "run xfce4-session-logout --logout",
+		0: "about",
+		2: "run foot -T Task Manager top",
+		4: "run sh -c swaylock -f -c 000000 && doas /usr/local/sbin/osxflow-suspend",
+		5: "run doas /sbin/reboot",
+		6: "run doas /sbin/poweroff",
+		8: "run sh -c swaylock -f -c 000000",
+		9: "run labwc --exit",
 	} {
 		if got := f.click(&rows[i]); got != want {
 			t.Errorf("%q asked for %q, want %q", rows[i].Label, got, want)
@@ -58,7 +57,7 @@ func TestMainRows(t *testing.T) {
 			t.Errorf("%q keeps the menu open", rows[i].Label)
 		}
 	}
-	if got := mainRows("", f)[10].Label; got != "Log Out" {
+	if got := mainRows("", f)[9].Label; got != "Log Out" {
 		t.Errorf("log out without a name = %q", got)
 	}
 }

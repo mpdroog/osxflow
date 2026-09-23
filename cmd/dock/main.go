@@ -30,6 +30,7 @@ import (
 	"github.com/mpdroog/osxflow/internal/launch"
 	"github.com/mpdroog/osxflow/internal/scale"
 	"github.com/mpdroog/osxflow/internal/stack"
+	"github.com/mpdroog/osxflow/internal/xmon"
 	"github.com/mpdroog/osxflow/internal/xsurface"
 	"github.com/mpdroog/osxflow/internal/xwin"
 )
@@ -72,9 +73,18 @@ type dockApp struct {
 	visual   argbVisual
 	colormap xproto.Colormap
 
-	win     xproto.Window
-	trigger xproto.Window
-	surf    *xsurface.Surface
+	win xproto.Window
+	// triggers is one reveal strip per monitor. A single strip along the
+	// bottom of the X screen -- the union of every monitor -- only works
+	// when they are all the same height: here the shorter screen's bottom
+	// row is 720px above the union's, so its strip was at a y the pointer
+	// could never reach and the dock could not be summoned there at all.
+	triggers []xproto.Window
+
+	// mons is every monitor, mon the one the dock is currently on.
+	mons []xmon.Rect
+	mon  xmon.Rect
+	surf *xsurface.Surface
 
 	th    *theme
 	set   *icons.Set
@@ -199,7 +209,7 @@ func newDock(scaleOverride float64, verbose bool) (*dockApp, error) {
 		}
 	}
 
-	server, err := xwin.NewX11With(X)
+	server, err := xwin.NewServerWith(X)
 	if err != nil {
 		d.faces.close()
 		d.conn.Close()
@@ -236,7 +246,22 @@ func newDock(scaleOverride float64, verbose bool) (*dockApp, error) {
 	}
 	// The root window tells us when the set of open windows changes, which
 	// is what keeps the running indicators honest without polling.
-	if watchErr := d.watchRoot(); watchErr != nil {
+	//
+	// Under Wayland it cannot -- and, the usual trap, it does not fail
+	// while not doing it. labwc really does set _NET_CLIENT_LIST and
+	// really does send the PropertyNotify, but only ever for XWayland
+	// clients, because those are the only windows the X server knows
+	// about. Firefox and foot are native Wayland toplevels: opening one
+	// changes nothing on the root, so no notification arrives and the row
+	// stays frozen at whatever happened to be running when the dock
+	// started. Every call succeeded. They just answered a question about a
+	// smaller world than the one being asked.
+	//
+	// So ask instead, in the moment the fallback below was already written
+	// for: just before the dock slides up.
+	if os.Getenv("WAYLAND_DISPLAY") != "" {
+		d.poll = true
+	} else if watchErr := d.watchRoot(); watchErr != nil {
 		log.Printf("warning: %v", watchErr)
 		// Without the notification the row can only be kept honest by
 		// asking, and the moment worth asking in is just before the dock
@@ -249,11 +274,13 @@ func newDock(scaleOverride float64, verbose bool) (*dockApp, error) {
 // createWindows sizes and creates the dock and its reveal trigger.
 func (d *dockApp) createWindows() error {
 	d.winW = int(dock.MaxWidth(d.items, &d.th.m) + 0.5)
-	d.winX = (int(d.screen.WidthInPixels) - d.winW) / 2
+	d.mons = xmon.All(d.conn, d.screen)
+	d.mon = xmon.Active(d.conn, d.screen)
+	d.winX = d.mon.X + (d.mon.W-d.winW)/2
 
 	// Created at its hidden position, so nothing flashes on screen before
 	// the first paint.
-	if err := d.createDockWindow(d.winW, d.th.winH, d.winX, int(d.screen.HeightInPixels)); err != nil {
+	if err := d.createDockWindow(d.winW, d.th.winH, d.winX, d.mon.Bottom()); err != nil {
 		return err
 	}
 	var err error
@@ -262,15 +289,16 @@ func (d *dockApp) createWindows() error {
 		return err
 	}
 
-	// The trigger spans the whole width of the screen: reaching the bottom
-	// edge anywhere should bring the dock up, exactly as it does on macOS.
-	err = d.createTriggerWindow(int(d.screen.WidthInPixels), triggerH,
-		0, int(d.screen.HeightInPixels)-triggerH)
-	if err != nil {
-		return err
+	// One trigger per monitor, each spanning that monitor's own width at
+	// that monitor's own bottom edge: reaching the bottom of whichever
+	// screen you are working on brings the dock there, as macOS does.
+	for _, m := range d.mons {
+		if err = d.createTriggerWindow(m.W, triggerH, m.X, m.Bottom()-triggerH); err != nil {
+			return err
+		}
 	}
 
-	for _, win := range []xproto.Window{d.win, d.trigger} {
+	for _, win := range append([]xproto.Window{d.win}, d.triggers...) {
 		if mapErr := xproto.MapWindowChecked(d.conn, win).Check(); mapErr != nil {
 			return fmt.Errorf("mapping window 0x%x: %w", win, mapErr)
 		}
@@ -356,7 +384,7 @@ func (d *dockApp) resizeIfNeeded() error {
 		return nil
 	}
 	d.winW = want
-	d.winX = (int(d.screen.WidthInPixels) - d.winW) / 2
+	d.winX = d.mon.X + (d.mon.W-d.winW)/2
 
 	// Checked, unlike the slide: this happens when an application starts
 	// or stops, not sixty times a second, and a window that did not take
@@ -509,7 +537,7 @@ func (d *dockApp) settled() bool { return d.reveal.Settled() && d.zoom.Done() }
 // where they are, so this is one ConfigureWindow per frame rather than a
 // megabyte of pixels.
 func (d *dockApp) slide() {
-	y := float64(int(d.screen.HeightInPixels)-d.th.winH) + d.reveal.Offset(float64(d.th.winH))
+	y := float64(d.mon.Bottom()-d.th.winH) + d.reveal.Offset(float64(d.th.winH))
 	d.moveWindow(d.win, d.winX, int(y))
 }
 

@@ -160,10 +160,10 @@ func (p *popup) create(d *dockApp, centreX float64) error {
 	if x < 0 {
 		x = 0
 	}
-	if x+p.w > int(d.screen.WidthInPixels) {
-		x = int(d.screen.WidthInPixels) - p.w
+	if x+p.w > d.mon.X+d.mon.W {
+		x = d.mon.X + d.mon.W - p.w
 	}
-	y := int(d.screen.HeightInPixels) - d.th.winH + int(d.th.panelTop()) - int(d.th.popupGap) - p.h
+	y := d.mon.Bottom() - d.th.winH + int(d.th.panelTop()) - int(d.th.popupGap) - p.h
 
 	win, err := xproto.NewWindowId(d.conn)
 	if err != nil {

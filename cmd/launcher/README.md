@@ -1,6 +1,6 @@
 # launcher
 
-A keyboard launcher for X11: type a few letters, get the application, and
+A keyboard launcher: type a few letters, get the application, and
 if it is already running get the window you already have instead of a
 second copy of it. Plus a calculator, because half of what a launcher gets
 typed into it is arithmetic.
@@ -58,6 +58,7 @@ Every decision the launcher makes is visible without the window:
     launcher -list      # applications found, and the binary each resolves to
     launcher -windows   # open windows, and the executable behind each one
     launcher -match     # which application each open window matched
+    launcher -where     # which monitor it would open on, and what gets the keyboard back
     launcher -search fi # how a query ranks
     launcher -eval '2^10'
     launcher -open Firefox
@@ -80,6 +81,44 @@ In order of confidence, best first:
 Focus is requested with `_NET_ACTIVE_WINDOW` and source indication 2
 ("pager"), which is what stops a window manager applying focus-stealing
 prevention and merely flashing the taskbar.
+
+## Which screen it opens on
+
+On the monitor holding the window you were just typing in, centred there
+and a quarter of the way down.
+
+Not the monitor under the pointer, which is what it used to use and is a
+bad guess for something a hotkey summons: the mouse sits wherever it was
+last used, which on two monitors is regularly not the one being typed on.
+Under a Wayland compositor it is worse than a guess, because X stops
+updating the pointer position the moment the cursor leaves an X11 surface,
+so the launcher opened on whichever screen the mouse last crossed one of
+its own windows on -- and stayed there however much the mouse moved.
+
+Which window has the keyboard is a question only the display server can
+answer, so it is asked there: `_NET_ACTIVE_WINDOW` under X11, and under
+Wayland the compositor's own window list, whose outputs carry the same
+connector name (`DP-8`) that XWayland's RandR reports -- which is what
+makes the answer usable for a window placed through X. When nothing can
+say, the pointer is still the fallback.
+
+`launcher -where` prints both answers without opening anything.
+
+## The keyboard, afterwards
+
+Dismissing the launcher puts the keyboard back where it was.
+
+It has to be done explicitly, and this is the reason: the window is
+override-redirect, so no window manager placed it and none of them has any
+record of what was focused before it appeared. Under labwc nothing then
+puts the focus back when it vanishes -- the launcher closes and the
+keyboard belongs to nothing at all, so the next thing typed goes nowhere
+and the window you were working in has to be clicked.
+
+So the focused window is noted before the launcher opens -- before, because
+opening it is what destroys the answer -- and activated again on the way
+out. Only on the way out of a launcher that launched nothing: when
+something was launched, it has the keyboard, and that is the point.
 
 ## Ranking
 
@@ -122,16 +161,14 @@ Losing the file costs the ranking, nothing else.
   window is open, and a stray click starting an application is a worse
   failure than one that does nothing. Clicking only moves the selection.
 - **No daemon.** Startup is ~10 ms cold, so there is nothing to amortise.
-- **X11 only.** `internal/xwin` is behind an interface, but Wayland has no
-  portable way to activate another client's window, so a Wayland
-  implementation would be per-compositor.
 
 ## Layout
 
 Library code lives in the repository's shared `internal/`, not under this
 directory, so the next tool can use it:
 
-    internal/xwin     X11: listing windows, focusing one (behind an interface)
+    internal/xwin     listing windows and focusing one: X11, and Wayland
+    internal/xmon     which monitor is which, and which one to open on
     internal/desktop  .desktop parsing and XDG directory scanning
     internal/calc     expression parser and evaluator
     internal/search   ranking applications against a query

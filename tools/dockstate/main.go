@@ -29,7 +29,7 @@ func run() (err error) {
 		fmt.Fprintln(os.Stderr, "warning:", p)
 	}
 	ix := launch.NewIndex(apps)
-	srv, err := xwin.NewX11()
+	srv, err := xwin.NewServer()
 	if err != nil {
 		return err
 	}
@@ -64,8 +64,12 @@ func run() (err error) {
 	if downloadsErr != nil {
 		fmt.Fprintln(os.Stderr, "warning: downloads:", downloadsErr)
 	}
+	// Must match pinnedIDs in cmd/dock/theme.go. This tool exists to
+	// explain what the dock sees, so a copy that has drifted from the
+	// dock's own list does not merely go stale -- it reports confidently
+	// about a dock that does not exist.
 	b := &dock.Builder{PinnedIDs: []string{
-		"thunderbird.desktop", "firefox.desktop", "com.mitchellh.ghostty.desktop",
+		"thunderbird.desktop", "org.mozilla.firefox.desktop", "com.mitchellh.ghostty.desktop",
 		"thunar.desktop", "com.discordapp.Discord.desktop"},
 		Index: ix, TrashDir: trashDir, DownloadsDir: downloadsDir}
 	items, _ := b.Build(wins) // the second result is the stacks, not an error

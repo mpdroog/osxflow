@@ -12,6 +12,8 @@ import (
 
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xproto"
+
+	"github.com/mpdroog/osxflow/internal/xmon"
 	"golang.org/x/image/font"
 
 	"github.com/mpdroog/osxflow/internal/glyph"
@@ -48,13 +50,36 @@ func (h *Host) IsOpen() bool { return h.popup != nil }
 // replacing any menu already open.
 func (h *Host) Open(centreX int, rows []Row) error {
 	h.Close()
+	// Before the window exists and before anything is grabbed: the other
+	// menus need the whole of this one's grab retry to let go of theirs.
+	h.announce()
 	p := &popup{hover: -1, hoverButton: -1, pointerX: -1, pointerY: -1, drag: -1, rows: rows}
 	var total float64
 	p.tops, total = layout(rows, h.Theme)
 
 	w, height := h.Theme.Width, int(total+0.5)
-	x := max(0, min(centreX-w/2, int(h.Screen.WidthInPixels)-w))
 	y := h.menuTop() + int(h.Theme.gap)
+
+	// Kept on ONE monitor. Clamping to h.Screen.WidthInPixels is clamping
+	// to the union of every monitor -- 7280px across the two here -- so a
+	// menu opened from a tray icon near the right of the left screen was
+	// free to run past its edge and across the bezel onto the other one.
+	// The monitor under the icon is the one it has to fit in.
+	mons := xmon.All(h.Conn, h.Screen)
+	m, ok := xmon.Containing(mons, centreX, y)
+	if !ok {
+		m = mons[0]
+	}
+	x := max(m.X, min(centreX-w/2, m.X+m.W-w))
+
+	// And kept on it vertically. A long list -- every VPN, every network in
+	// range -- can be taller than what is left below the panel, and the
+	// shorter of two monitors runs out first. Sliding it up beats running
+	// off the bottom; a menu taller than the whole screen still overflows,
+	// but nothing short of scrolling helps there.
+	if y+height > m.Bottom() {
+		y = max(m.Y, m.Bottom()-height)
+	}
 	win, err := h.NewWindow(x, y, w, height, "osxflow-menu", uint32(xproto.EventMaskExposure|
 		xproto.EventMaskButtonPress|xproto.EventMaskButtonRelease|
 		xproto.EventMaskPointerMotion|xproto.EventMaskKeyPress))

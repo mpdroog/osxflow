@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"os/user"
 	"strings"
 
@@ -80,16 +81,32 @@ func start() error {
 		}
 	}()
 
+	// One menu at a time across all of them, and -- through the same
+	// signal -- a way for the launcher to get the keyboard back. macmenu
+	// is the only one of the menus that was left out of this, and being
+	// left out means the Apple menu alone could sit there holding the X
+	// grabs with nothing able to ask it to stop. Not fatal: without it
+	// the menus merely overlap, as they did before.
+	closeMenus, err := host.Exclusive(session)
+	if err != nil {
+		log.Printf("menu exclusivity unavailable: %v", err)
+	}
+
 	a := &app{conn: xu.Conn(), host: host}
-	if a.x, err = host.PointerX(); err != nil {
-		// The menu opens at the left edge, which is where the launcher is
-		// anyway.
+	// Under Wayland the pointer is not an answer at all: XWayland tracks
+	// it only over XWayland surfaces, so QueryPointer returns wherever it
+	// last left an X window and the menu lands somewhere arbitrary. The
+	// left edge is this menu's home anyway -- it is the Apple menu, and it
+	// is what the code already fell back to.
+	if os.Getenv("WAYLAND_DISPLAY") != "" {
+		a.x = 0
+	} else if a.x, err = host.PointerX(); err != nil {
 		log.Printf("%v; opening the menu at the left edge", err)
 	}
 	if err := host.Open(a.x, mainRows(fullName(), a)); err != nil {
 		return fmt.Errorf("opening the menu: %w", err)
 	}
-	return a.loop(closeReq)
+	return a.loop(closeReq, closeMenus)
 }
 
 // claim takes the bus name, or, when another macmenu has it, asks that one
@@ -139,7 +156,7 @@ var _ actions = (*app)(nil)
 
 // loop waits until the menu closes -- chosen, dismissed or closed from a
 // second click -- and returns.
-func (a *app) loop(closeReq <-chan struct{}) error {
+func (a *app) loop(closeReq, closeMenus <-chan struct{}) error {
 	events := make(chan xgb.Event, 64)
 	xGone := make(chan error, 1)
 	go readEvents(a.conn, events, xGone)
@@ -152,6 +169,9 @@ func (a *app) loop(closeReq <-chan struct{}) error {
 		case err := <-xGone:
 			return err
 		case <-closeReq:
+			a.host.Close()
+		case <-closeMenus:
+			// Another menu opened, or the launcher wants the keyboard.
 			a.host.Close()
 		}
 	}

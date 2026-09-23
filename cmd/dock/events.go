@@ -9,6 +9,7 @@ import (
 	"github.com/jezek/xgb/xproto"
 
 	"github.com/mpdroog/osxflow/internal/dock"
+	"github.com/mpdroog/osxflow/internal/xmon"
 )
 
 // handle applies one event.
@@ -25,7 +26,7 @@ func (d *dockApp) handle(ev xgb.Event) (show, leaving bool, err error) {
 		if d.popup != nil {
 			return d.popup.motion(d, int(e.EventX), int(e.EventY))
 		}
-		return d.pointerAt(float64(e.EventX), float64(e.EventY), float64(e.RootY))
+		return d.pointerAt(float64(e.EventX), float64(e.EventY), float64(e.RootX), float64(e.RootY))
 
 	case xproto.LeaveNotifyEvent:
 		if d.popup != nil {
@@ -35,7 +36,7 @@ func (d *dockApp) handle(ev xgb.Event) (show, leaving bool, err error) {
 		// which is what happens when the dock is revealed from a point off
 		// to one side of it: the pointer sits on the strip and on nothing
 		// else, so this is the only word the dock gets that it has gone.
-		if e.Event == d.trigger {
+		if d.isTrigger(e.Event) {
 			return false, true, nil
 		}
 		if e.Event != d.win {
@@ -89,11 +90,11 @@ func (d *dockApp) handle(ev xgb.Event) (show, leaving bool, err error) {
 
 // enter handles the pointer arriving at the bottom edge or on the dock.
 func (d *dockApp) enter(e xproto.EnterNotifyEvent) (show, leaving bool, err error) {
-	switch e.Event {
-	case d.trigger:
-		// The bottom edge of the screen: bring the dock up. Nothing else
-		// belongs on this path -- it is the whole of the latency the user
-		// feels, and the first frame of the slide is one tick away.
+	if d.isTrigger(e.Event) {
+		// The bottom edge of a screen: bring the dock up *there*. Nothing
+		// else belongs on this path -- it is the whole of the latency the
+		// user feels, and the first frame of the slide is one tick away.
+		d.retarget(int(e.RootX), int(e.RootY))
 		d.reveal.Show()
 		d.zoom.Target = 1
 		d.raise(d.win)
@@ -115,11 +116,13 @@ func (d *dockApp) enter(e xproto.EnterNotifyEvent) (show, leaving bool, err erro
 			}
 		}
 		return true, false, nil
+	}
 
-	case d.win:
+	if e.Event == d.win {
 		// The dock slid up under a pointer that never moved, so this is
 		// the first indication of where the cursor actually is.
-		show, _, err = d.pointerAt(float64(e.EventX), float64(e.EventY), float64(e.RootY))
+		show, _, err = d.pointerAt(float64(e.EventX), float64(e.EventY),
+			float64(e.RootX), float64(e.RootY))
 		return show || true, false, err
 	}
 	return false, false, nil
@@ -131,7 +134,7 @@ func (d *dockApp) enter(e xproto.EnterNotifyEvent) (show, leaving bool, err erro
 // x and y are in window coordinates and rootY is the pointer's distance
 // down the screen, which is not the same question at all while the dock is
 // in motion.
-func (d *dockApp) pointerAt(x, y, rootY float64) (show, leaving bool, err error) {
+func (d *dockApp) pointerAt(x, y, rootX, rootY float64) (show, leaving bool, err error) {
 	// The row may have changed while the dock was down. The trigger catches
 	// up on that before revealing, but the pointer can reach the dock's own
 	// window without passing through the trigger, and hit-testing the new
@@ -142,7 +145,7 @@ func (d *dockApp) pointerAt(x, y, rootY float64) (show, leaving bool, err error)
 		}
 	}
 	d.cursorX = x
-	inside := d.overPanel(x, y) || d.atBottomEdge(rootY)
+	inside := d.overPanel(x, y) || d.atBottomEdge(rootX, rootY)
 	hover := dock.Hit(d.items, d.places, d.th.baselineY(), x, y)
 	if hover >= 0 {
 		inside = true
@@ -202,8 +205,40 @@ func (d *dockApp) overPanel(x, y float64) bool {
 // finished getting out of the way, and then took the delay and the slide
 // again: the best part of a second to answer a gesture that normally takes
 // twenty milliseconds.
-func (d *dockApp) atBottomEdge(rootY float64) bool {
-	return rootY >= float64(int(d.screen.HeightInPixels)-triggerH)
+func (d *dockApp) atBottomEdge(rootX, rootY float64) bool {
+	// Per monitor, because the union's bottom row is not every monitor's:
+	// a shorter screen's own bottom edge is well above it.
+	x, y := int(rootX), int(rootY)
+	for _, m := range d.mons {
+		if x >= m.X && x < m.X+m.W && y >= m.Bottom()-triggerH && y < m.Bottom() {
+			return true
+		}
+	}
+	return false
+}
+
+// isTrigger reports whether a window is one of the reveal strips.
+func (d *dockApp) isTrigger(w xproto.Window) bool {
+	for _, t := range d.triggers {
+		if t == w {
+			return true
+		}
+	}
+	return false
+}
+
+// retarget moves the dock to the monitor the pointer is on.
+//
+// Only x and the monitor change here; the y comes from slide, so a dock
+// caught mid-animation keeps its place in it rather than jumping.
+func (d *dockApp) retarget(rootX, rootY int) {
+	m, ok := xmon.Containing(d.mons, rootX, rootY)
+	if !ok || m == d.mon {
+		return
+	}
+	d.mon = m
+	d.winX = m.X + (m.W-d.winW)/2
+	d.slide()
 }
 
 // click activates whatever is under the pointer.

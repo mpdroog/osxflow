@@ -86,16 +86,19 @@ type app struct {
 	conn *xgb.Conn
 	host *menu.Host
 
-	sys      *dbus.Conn
-	session  *dbus.Conn
-	bt       *bluez.Client
-	btC      <-chan struct{}
-	agent    *bluez.Agent
-	agentReq <-chan *bluez.Pending
-	radio    *rfkill.Watcher
-	radioC   <-chan rfkill.Event
-	switches rfkill.Switches
-	item     *sni.Item
+	sys     *dbus.Conn
+	session *dbus.Conn
+
+	// closeMenus carries "another osxflow menu opened"; see menu.Exclusive.
+	closeMenus <-chan struct{}
+	bt         *bluez.Client
+	btC        <-chan struct{}
+	agent      *bluez.Agent
+	agentReq   <-chan *bluez.Pending
+	radio      *rfkill.Watcher
+	radioC     <-chan rfkill.Event
+	switches   rfkill.Switches
+	item       *sni.Item
 
 	view view
 	icon iconState
@@ -169,6 +172,12 @@ func newApp(scaleOverride float64, verbose bool) (*app, error) {
 	if a.session, err = dbus.ConnectSessionBus(); err != nil {
 		return abandon(fmt.Errorf("connecting to the session bus: %w", err))
 	}
+	// One menu at a time across all of them. Not fatal: without it they
+	// merely overlap, as they did before.
+	if a.closeMenus, err = a.host.Exclusive(a.session); err != nil {
+		log.Printf("menu exclusivity unavailable: %v", err)
+	}
+
 	a.icon, a.tip = iconFor(&a.view), tooltipFor(&a.view)
 	a.item, err = sni.Export(a.session, &sni.Options{
 		ID:       "osxflow-bluemenu",
@@ -208,6 +217,10 @@ func (a *app) run() error {
 
 		case c := <-a.item.Clicks():
 			a.clicked(c)
+
+		case <-a.closeMenus:
+			// Another osxflow menu opened.
+			a.host.Close()
 
 		case err := <-a.item.Registrations():
 			switch {
@@ -408,7 +421,8 @@ func (a *app) clicked(c sni.Click) {
 		a.host.Close()
 		return
 	}
-	x, err := a.host.PointerX()
+	a.host.AnchorY = c.Y
+	x, err := a.host.MenuX(c.X)
 	if err != nil {
 		log.Printf("%v; using the tray's position %d", err, c.X)
 		x = c.X
