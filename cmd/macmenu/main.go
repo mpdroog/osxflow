@@ -3,9 +3,10 @@
 // Manager, Sleep, Restart, Shut Down, Lock Screen and Log Out.
 //
 // It replaces Whisker Menu for everything but finding apps, which is the
-// launcher's (Cmd+Space). A panel launcher runs it on click: it opens under
-// the pointer, does what is chosen, and exits -- nothing stays in memory
-// between clicks. Clicking the launcher again while it is open closes it.
+// launcher's (Cmd+Space). menubar runs it when Tux is clicked (a panel
+// launcher did before): it opens under the pointer, does what is chosen,
+// and exits -- nothing stays in memory between clicks. Clicking Tux again
+// while it is open closes it.
 package main
 
 import (

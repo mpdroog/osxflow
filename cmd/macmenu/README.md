@@ -14,9 +14,10 @@ Apps are not in it: finding and starting them is the launcher's job
 
 ## How it runs
 
-Nothing stays running. A panel launcher starts macmenu when it is clicked;
+Nothing stays running. [menubar](../menubar/README.md) starts macmenu when
+Tux is clicked (under xfce4-panel, a panel launcher did);
 it opens under the pointer, does what was chosen, and exits. Clicking the
-launcher again while the menu is open closes it: the second macmenu finds
+Tux again while the menu is open closes it: the second macmenu finds
 the first on the session bus (`org.osxflow.MacMenu`) and tells it to close.
 
 Sleep, restart, shut down and log out go through `xfce4-session-logout`,
@@ -32,7 +33,9 @@ Locking is `xflock4`, which uses whichever locker XFCE is set up with.
     make macmenu
     install -m755 bin/macmenu ~/.local/bin/macmenu
 
-**2. Add a launcher for it at the left end of the panel.** Pick a plugin
+**2. With menubar, nothing more: Tux runs macmenu from beside menubar's
+own binary.** Under xfce4-panel instead, add a launcher for it at the left
+end of the panel. Pick a plugin
 id that is not taken (`xfconf-query -c xfce4-panel -l | grep plugin-`),
 15 here (1-14 were taken), give it a launcher item, and put its id first in the panel's list.
 Its icon is [macmenu.svg](macmenu.svg), Tux's head (from Simple Icons, CC0)

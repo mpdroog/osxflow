@@ -303,18 +303,23 @@ func (it *Item) register() error {
 }
 
 func noOwner(err error) bool {
-	var name string
+	name := errorName(err)
+	return name == "org.freedesktop.DBus.Error.ServiceUnknown" || name == "org.freedesktop.DBus.Error.NameHasNoOwner"
+}
+
+// errorName is the D-Bus error name err carries, or "" when it is not a
+// D-Bus error. godbus returns dbus.Error by value from some calls and by
+// pointer from others.
+func errorName(err error) string {
 	var dbusErr dbus.Error
 	var dbusErrPtr *dbus.Error
 	switch {
 	case errors.As(err, &dbusErr):
-		name = dbusErr.Name
+		return dbusErr.Name
 	case errors.As(err, &dbusErrPtr):
-		name = dbusErrPtr.Name
-	default:
-		return false
+		return dbusErrPtr.Name
 	}
-	return name == "org.freedesktop.DBus.Error.ServiceUnknown" || name == "org.freedesktop.DBus.Error.NameHasNoOwner"
+	return ""
 }
 
 // FromImage converts a drawn image into a pixmap. image.RGBA holds

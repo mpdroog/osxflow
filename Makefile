@@ -62,6 +62,9 @@ fuzz:
 	go test ./internal/unpack -run=XXX -fuzz=FuzzClean            -fuzztime=10s
 	go test ./internal/unpack -run=XXX -fuzz=FuzzExtractTar       -fuzztime=20s
 	go test ./internal/unpack -run=XXX -fuzz=FuzzExtractZip       -fuzztime=20s
+	go test ./internal/sni    -run=XXX -fuzz=FuzzParseService     -fuzztime=10s
+	go test ./internal/sni    -run=XXX -fuzz=FuzzToImage          -fuzztime=20s
+	go test ./internal/dbusmenu -run=XXX -fuzz=FuzzLabel          -fuzztime=10s
 
 lint: errguard
 	gofmt -l .

@@ -193,8 +193,19 @@ type Window struct {
 // owner, not decorated, focused and listed in the taskbar by the window
 // manager.
 func (h *Host) NewWindow(x, y, width, height int, name string, events uint32) (*Window, error) {
+	return h.newWindow(x, y, width, height, name, events, true)
+}
+
+// NewManagedWindow is NewWindow for a window the window manager is to
+// handle: a panel, which needs it to honour its strut and keep it on every
+// workspace. The caller sets the window type and the rest before mapping.
+func (h *Host) NewManagedWindow(x, y, width, height int, name string, events uint32) (*Window, error) {
+	return h.newWindow(x, y, width, height, name, events, false)
+}
+
+func (h *Host) newWindow(x, y, width, height int, name string, events uint32, overrideRedirect bool) (*Window, error) {
 	w := &Window{host: h, W: width, H: height}
-	if err := w.create(x, y, name, events); err != nil {
+	if err := w.create(x, y, name, events, overrideRedirect); err != nil {
 		// Whatever create got as far as making would otherwise stay on the
 		// server until the tool exits.
 		w.Close()
@@ -203,7 +214,7 @@ func (h *Host) NewWindow(x, y, width, height int, name string, events uint32) (*
 	return w, nil
 }
 
-func (w *Window) create(x, y int, name string, events uint32) error {
+func (w *Window) create(x, y int, name string, events uint32, overrideRedirect bool) error {
 	h := w.host
 	cmap, err := xproto.NewColormapId(h.Conn)
 	if err != nil {
@@ -224,7 +235,11 @@ func (w *Window) create(x, y int, name string, events uint32) error {
 	// EventMask, Colormap.
 	mask := uint32(xproto.CwBackPixel | xproto.CwBorderPixel |
 		xproto.CwOverrideRedirect | xproto.CwEventMask | xproto.CwColormap)
-	values := []uint32{0, 0, 1, events, uint32(cmap)}
+	redirect := uint32(0)
+	if overrideRedirect {
+		redirect = 1
+	}
+	values := []uint32{0, 0, redirect, events, uint32(cmap)}
 	if createErr := xproto.CreateWindowChecked(h.Conn, h.visual.depth, id, h.Screen.Root,
 		geom.I16(x), geom.I16(y), geom.U16(w.W), geom.U16(w.H), 0,
 		xproto.WindowClassInputOutput, h.visual.id, mask, values).Check(); createErr != nil {
