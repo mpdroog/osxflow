@@ -58,6 +58,16 @@ func buildRows(st *netmgr.State, act actions) []menu.Row {
 	if len(rows) > 0 {
 		rows = append(rows, menu.Row{Kind: menu.Separator})
 	}
+	// The address last, above Settings, the way macOS keeps the details of
+	// a connection below the list of them. It is the one thing here that
+	// answers a question rather than offering an action -- "what is my
+	// IP" -- and waybar's network module, which this bar replaced, put it
+	// on the bar itself.
+	if st.Address != "" {
+		rows = append(rows,
+			menu.Row{Kind: menu.Separator},
+			menu.Row{Kind: menu.Header, Label: "IP Address", Detail: st.Address})
+	}
 	return append(rows, menu.Row{Kind: menu.Action, Label: "Network Settings…", Click: act.settings})
 }
 

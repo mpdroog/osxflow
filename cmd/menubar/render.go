@@ -30,43 +30,47 @@ func (a *app) shownItems() []*trayItem {
 	return out
 }
 
-// relayout works out the slots again, after anything that changes what is
-// on the bar, and marks it for drawing.
-func (a *app) relayout() {
+// relayout works out one bar's slots again, after anything that changes
+// what is on it, and marks it for drawing.
+func (a *app) relayout(s *screen) {
 	a.shown = a.shownItems()
-	a.slots = layoutBar(a.width, a.m, text.Width(a.bold, a.appName), text.Width(a.regular, a.clock), len(a.shown))
-	a.hover = -1
-	if a.pointer.In(image.Rect(0, 0, a.width, a.m.height)) {
-		a.hover = at(a.slots, a.pointer, a.m.height)
+	s.slots = layoutBar(s.width, s.m,
+		text.Width(s.art.bold, a.appName), text.Width(s.art.regular, a.clock), len(a.shown))
+	s.hover = -1
+	if s.pointer.In(image.Rect(0, 0, s.width, s.m.height)) {
+		s.hover = at(s.slots, s.pointer, s.m.height)
 	}
-	a.dirty = true
+	s.dirty = true
 }
 
-func (a *app) paint() error {
-	a.dirty = false
-	img := a.win.Surf.Image()
+func (a *app) paint(s *screen) error {
+	s.dirty = false
+	img, err := s.frame()
+	if err != nil {
+		return err
+	}
 	paint.Clear(img)
 	paint.FillBlend(img, img.Bounds(), colBar)
-	mid := a.m.height / 2
-	for i := range a.slots {
-		s := &a.slots[i]
-		if i == a.hover && s.clickable() {
-			paint.RoundRect(img, s.r, float64(a.m.radius), colHighlight)
+	mid := s.m.height / 2
+	for i := range s.slots {
+		sl := &s.slots[i]
+		if i == s.hover && sl.clickable() {
+			paint.RoundRect(img, sl.r, float64(s.m.radius), colHighlight)
 		}
-		switch s.kind {
+		switch sl.kind {
 		case slotMenu:
-			centre(img, a.tux, s.r, mid)
+			centre(img, s.art.tux, sl.r, mid)
 		case slotItem:
-			if icon := a.shown[s.item].icon; icon != nil {
-				centre(img, icon, s.r, mid)
+			if icon := a.itemIcon(a.shown[sl.item], s); icon != nil {
+				centre(img, icon, sl.r, mid)
 			}
 		case slotApp:
-			label(img, a.bold, s.r.Min.X+a.m.pad, mid, a.appName, s.r.Dx()-2*a.m.pad)
+			label(img, s.art.bold, sl.r.Min.X+s.m.pad, mid, a.appName, sl.r.Dx()-2*s.m.pad)
 		case slotClock:
-			label(img, a.regular, s.r.Min.X+a.m.pad, mid, a.clock, s.r.Dx()-2*a.m.pad+1)
+			label(img, s.art.regular, sl.r.Min.X+s.m.pad, mid, a.clock, sl.r.Dx()-2*s.m.pad+1)
 		}
 	}
-	return a.win.Surf.Flush()
+	return s.flush()
 }
 
 // centre draws src centred in r's width and on the bar's middle.

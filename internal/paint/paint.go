@@ -368,3 +368,33 @@ func OverAlpha(dst *image.RGBA, src image.Image, x, y int, alpha float64) {
 	draw.DrawMask(dst, image.Rect(x, y, x+b.Dx(), y+b.Dy()).Intersect(dst.Bounds()),
 		src, b.Min, mask, image.Point{}, draw.Over)
 }
+
+// BGRA rewrites Go's R,G,B,A pixels into the B,G,R,A order that both a
+// little-endian X server and wl_shm's ARGB8888 want. dst and src may be
+// the same slice.
+//
+// Both display servers name the format by how a 32-bit word reads, not by
+// how the bytes sit: X's 32-bit TrueColor visual and Wayland's ARGB8888
+// are the same four bytes in memory on every machine these binaries run
+// on, which is why one function serves both.
+//
+// The alpha byte is carried through unchanged. That is what makes a
+// 32-bit X visual translucent under a compositor, and what lets a
+// layer-shell surface show the desktop through it.
+//
+// A pixel at a time rather than a byte at a time: this runs over the whole
+// surface on every frame, and the byte-wise version spent two thirds of a
+// millisecond of an 8 ms budget on four dependent byte loads and stores
+// where one 32-bit load, a swap of two of its bytes and one store will do.
+func BGRA(dst, src []byte) {
+	n := min(len(dst), len(src))
+	dst, src = dst[:n], src[:n]
+	for i := 0; i+4 <= n; i += 4 {
+		in := src[i : i+4 : i+4]
+		out := dst[i : i+4 : i+4]
+		v := uint32(in[0]) | uint32(in[1])<<8 | uint32(in[2])<<16 | uint32(in[3])<<24
+		v = v&0xff00ff00 | (v&0x00ff0000)>>16 | (v&0x000000ff)<<16
+		//nolint:gosec // a byte conversion of a 32-bit word is the truncation asked for
+		out[0], out[1], out[2], out[3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"github.com/jezek/xgb/xproto"
 
 	"github.com/mpdroog/osxflow/internal/geom"
+	"github.com/mpdroog/osxflow/internal/paint"
 )
 
 // Surface is a double-buffered drawing target for one window.
@@ -214,15 +215,7 @@ func encodeInto(dst, src []byte, swapRB bool) {
 		copy(dst, src)
 		return
 	}
-	dst = dst[:len(src)]
-	for i := 0; i+4 <= len(src); i += 4 {
-		in := src[i : i+4 : i+4]
-		out := dst[i : i+4 : i+4]
-		v := uint32(in[0]) | uint32(in[1])<<8 | uint32(in[2])<<16 | uint32(in[3])<<24
-		v = v&0xff00ff00 | (v&0x00ff0000)>>16 | (v&0x000000ff)<<16
-		//nolint:gosec // a byte conversion of a 32-bit word is the truncation asked for
-		out[0], out[1], out[2], out[3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
-	}
+	paint.BGRA(dst, src)
 }
 
 // Close releases the server-side resources.

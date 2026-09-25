@@ -185,6 +185,11 @@ func newTestConn(t *testing.T) *Conn {
 		outputs:     make(map[uint32]*Output),
 		outputNames: make(map[uint32]uint32),
 		pending:     make(map[uint32]chan struct{}),
+		bars:        make(map[uint32]*Bar),
+		surfaces:    make(map[uint32]*Bar),
+		fracs:       make(map[uint32]*Bar),
+		buffers:     make(map[uint32]*buffer),
+		events:      make(chan Event, eventBuffer),
 		done:        make(chan struct{}),
 	}
 }

@@ -148,6 +148,11 @@ type State struct {
 
 	// Wired reports an activated Ethernet connection.
 	Wired bool
+
+	// Address is the IPv4 address of the connection NetworkManager is
+	// routing through, or "" when nothing is routed. It is what the old
+	// waybar module showed as {ipaddr}.
+	Address string
 }
 
 // Wifi returns the network in use or being joined, or nil.

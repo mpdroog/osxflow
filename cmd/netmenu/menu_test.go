@@ -184,3 +184,34 @@ func TestBuildRowsCaps(t *testing.T) {
 		t.Errorf("showed %d known and %d other, want %d and %d", known, other, maxKnown, maxOther)
 	}
 }
+
+func TestAddressRowShowsTheIP(t *testing.T) {
+	st := &netmgr.State{Address: "192.168.2.15"}
+	rows := buildRows(st, &fakeActions{})
+
+	var found *menu.Row
+	for i := range rows {
+		if rows[i].Kind == menu.Header && rows[i].Label == "IP Address" {
+			found = &rows[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no IP Address row in %d rows", len(rows))
+	}
+	if found.Detail != "192.168.2.15" {
+		t.Errorf("IP Address detail = %q, want 192.168.2.15", found.Detail)
+	}
+	if found.Click != nil {
+		t.Error("the address row is there to be read, not clicked")
+	}
+}
+
+// Nothing routed shows no row at all, rather than an empty one under a
+// heading that promises an address.
+func TestNoAddressRowWithoutAnAddress(t *testing.T) {
+	for _, r := range buildRows(&netmgr.State{}, &fakeActions{}) {
+		if r.Kind == menu.Header && r.Label == "IP Address" {
+			t.Fatal("an IP Address row with no address")
+		}
+	}
+}

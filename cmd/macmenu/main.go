@@ -47,6 +47,7 @@ const (
 
 func start() error {
 	scaleFlag := flag.Float64("scale", 0, "display scale factor (0 detects it)")
+	xFlag := flag.Int("x", -1, "x to centre the menu under, in screen pixels (-1 to work it out)")
 	flag.Parse()
 
 	session, err := dbus.ConnectSessionBus()
@@ -93,15 +94,25 @@ func start() error {
 	}
 
 	a := &app{conn: xu.Conn(), host: host}
-	// Under Wayland the pointer is not an answer at all: XWayland tracks
-	// it only over XWayland surfaces, so QueryPointer returns wherever it
-	// last left an X window and the menu lands somewhere arbitrary. The
-	// left edge is this menu's home anyway -- it is the Apple menu, and it
-	// is what the code already fell back to.
-	if os.Getenv("WAYLAND_DISPLAY") != "" {
+	switch {
+	case *xFlag >= 0:
+		// Whoever started us knows where Tux is, which is the only
+		// reliable answer under Wayland: menubar draws a bar on every
+		// monitor and passes the x of the one that was clicked. Open
+		// clamps it to the monitor that x is on, so the menu comes down
+		// under that bar's Tux and not the leftmost screen's.
+		a.x = *xFlag
+	case os.Getenv("WAYLAND_DISPLAY") != "":
+		// Nobody said, and under Wayland the pointer is not an answer at
+		// all: XWayland tracks it only over XWayland surfaces, so
+		// QueryPointer returns wherever it last left an X window and the
+		// menu lands somewhere arbitrary. The left edge is this menu's
+		// home anyway -- it is the Apple menu.
 		a.x = 0
-	} else if a.x, err = host.PointerX(); err != nil {
-		log.Printf("%v; opening the menu at the left edge", err)
+	default:
+		if a.x, err = host.PointerX(); err != nil {
+			log.Printf("%v; opening the menu at the left edge", err)
+		}
 	}
 	if err := host.Open(a.x, mainRows(fullName(), a)); err != nil {
 		return fmt.Errorf("opening the menu: %w", err)

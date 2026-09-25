@@ -191,12 +191,22 @@ func (h *Host) Keycodes(keysym xproto.Keysym) ([]xproto.Keycode, error) {
 // needed. The answer is always usable -- the top of the screen when
 // nothing better is known -- and what went wrong is logged.
 func (h *Host) menuTop() int {
+	// Under Wayland the session's own figure wins, because X's is not to
+	// be trusted. labwc does publish _NET_WORKAREA -- this file used to
+	// say it did not -- but it lags what is really reserved: measured
+	// here reading 0,32 with the bar that reserved those 32 pixels
+	// already killed, and 0,0 with a layer-shell bar up and really
+	// reserving 29. A stale figure passes every check below, and the
+	// menu it places opens inside the bar or a few pixels under it.
+	if os.Getenv("WAYLAND_DISPLAY") != "" {
+		if p := panelHeight(); p > 0 {
+			return p
+		}
+	}
 	reply, err := xwin.GetProperty(h.Conn, h.Screen.Root, h.workarea, "_NET_WORKAREA")
 	switch {
 	case errors.Is(err, xwin.ErrPropUnset):
-		// No window manager, one that reserves nothing for panels -- or
-		// labwc, which cannot express a layer-shell panel as EWMH and so
-		// publishes no work area at all.
+		// No window manager, or one that reserves nothing for panels.
 		return h.anchorTop()
 	case err != nil:
 		log.Printf("work area: %v; placing the menu below the tray icon", err)
@@ -227,9 +237,10 @@ func (h *Host) menuTop() int {
 // clicks on the same icon in a bar 28 pixels tall -- so using it directly
 // opens the menu a few pixels inside the bar, over the icons.
 //
-// Nothing on the system will say how tall the panel is. labwc publishes no
-// _NET_WORKAREA, and a layer-shell surface's geometry and exclusive zone
-// are not visible to other clients at all. So it is told:
+// Nothing on the system will say how tall the panel is, honestly. A
+// layer-shell surface's geometry and exclusive zone are not visible to
+// other clients at all, and labwc's _NET_WORKAREA, which would stand in
+// for them, lags the bars that set it -- see menuTop. So it is told:
 // OSXFLOW_PANEL_HEIGHT, set beside the panel's own height in the session's
 // autostart. Unset, the tray's y is still a better guess than zero.
 func (h *Host) anchorTop() int {

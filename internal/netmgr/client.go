@@ -22,6 +22,7 @@ const (
 	ifaceSettings   = BusName + ".Settings"
 	ifaceConnection = BusName + ".Settings.Connection"
 	ifaceActive     = BusName + ".Connection.Active"
+	ifaceIP4        = BusName + ".IP4Config"
 
 	propsGetAll = "org.freedesktop.DBus.Properties.GetAll"
 	propsSet    = "org.freedesktop.DBus.Properties.Set"
@@ -71,10 +72,19 @@ func (c *Client) Snapshot(ctx context.Context) (State, error) {
 	saved, savedErr := c.saved(ctx)
 	active, activeErr := c.active(ctx, activePaths)
 
+	// PrimaryConnection is read without insisting on it: NetworkManager
+	// older than 0.9.10 has no such property, and for the one thing it is
+	// wanted for -- an address to show -- a missing property and nothing
+	// routed come to the same empty answer.
+	primary, _ := value[dbus.ObjectPath](root, rootPath, "PrimaryConnection")
+	address, addressErr := c.address(ctx, primary)
+
 	st.Networks = Networks(aps, activeAP, saved, active)
 	st.VPNs = VPNs(saved, active)
 	st.Wired = Wired(active)
-	return st, errors.Join(enabledErr, hardwareErr, devicesErr, activeListErr, apErr, savedErr, activeErr)
+	st.Address = address
+	return st, errors.Join(enabledErr, hardwareErr, devicesErr, activeListErr,
+		apErr, savedErr, activeErr, addressErr)
 }
 
 // accessPoints finds the first Wi-Fi device, records it in st, and reads
@@ -227,6 +237,62 @@ func (c *Client) active(ctx context.Context, paths []dbus.ObjectPath) ([]Active,
 		out = append(out, Active{Path: p, Connection: conn, Type: typ, State: ActiveState(state)})
 	}
 	return out, errors.Join(errs...)
+}
+
+// address is the IPv4 address of the connection carrying the traffic.
+//
+// NetworkManager's PrimaryConnection is the one it is actually routing
+// through, which is the address a user means by "my IP" when the machine
+// is on Ethernet and Wi-Fi at once. Nothing routed is not a failure: a
+// laptop between networks has no primary connection, and an empty string
+// is the honest answer.
+//
+// The address lives two objects away -- the active connection names an
+// IP4Config, which holds the addresses -- and either hop can be a path
+// that has just gone away, which is ordinary rather than an error.
+func (c *Client) address(ctx context.Context, primary dbus.ObjectPath) (string, error) {
+	if primary == "" || primary == noObject {
+		return "", nil
+	}
+	props, err := c.getAll(ctx, primary, ifaceActive)
+	if gone(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	ip4, err := value[dbus.ObjectPath](props, primary, "Ip4Config")
+	if err != nil {
+		return "", err
+	}
+	if ip4 == "" || ip4 == noObject {
+		return "", nil
+	}
+	ipProps, err := c.getAll(ctx, ip4, ifaceIP4)
+	if gone(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	// AddressData is aa{sv}: one dictionary per address, each with an
+	// "address" and a "prefix". The first is the one NetworkManager
+	// considers primary, and an interface with several is rare enough
+	// that showing the first is right and showing all of them is clutter.
+	data, err := value[[]map[string]dbus.Variant](ipProps, ip4, "AddressData")
+	if err != nil {
+		return "", err
+	}
+	for _, d := range data {
+		v, ok := d["address"]
+		if !ok {
+			continue
+		}
+		if addr, ok := v.Value().(string); ok && addr != "" {
+			return addr, nil
+		}
+	}
+	return "", nil
 }
 
 // SetWifi turns the Wi-Fi radio on or off.

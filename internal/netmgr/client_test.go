@@ -89,6 +89,8 @@ const (
 	pathGoneAP     = dbus.ObjectPath("/org/freedesktop/NetworkManager/AccessPoint/99")
 	pathGoneSaved  = dbus.ObjectPath("/org/freedesktop/NetworkManager/Settings/99")
 	pathGoneActive = dbus.ObjectPath("/org/freedesktop/NetworkManager/ActiveConnection/98")
+	pathActiveWifi = dbus.ObjectPath("/org/freedesktop/NetworkManager/ActiveConnection/1")
+	pathIP4        = dbus.ObjectPath("/org/freedesktop/NetworkManager/IP4Config/1")
 )
 
 func props(t *testing.T, conn *dbus.Conn, path dbus.ObjectPath, m prop.Map) *prop.Properties {
@@ -140,6 +142,7 @@ func startFake(t *testing.T) (*Client, *fakeNM) {
 		"WirelessEnabled":         {Value: true, Writable: true, Emit: prop.EmitTrue},
 		"WirelessHardwareEnabled": ro(true),
 		"Devices":                 ro([]dbus.ObjectPath{pathEthernet, pathWifi}),
+		"PrimaryConnection":       ro(pathActiveWifi),
 		"ActiveConnections": ro([]dbus.ObjectPath{
 			"/org/freedesktop/NetworkManager/ActiveConnection/1",
 			pathGoneActive,
@@ -192,15 +195,27 @@ func startFake(t *testing.T) (*Client, *fakeNM) {
 		typ     string
 		state   uint32
 	}{
-		"/org/freedesktop/NetworkManager/ActiveConnection/1": {"/org/freedesktop/NetworkManager/Settings/1", TypeWifi, uint32(StateActivated)},
+		pathActiveWifi: {"/org/freedesktop/NetworkManager/Settings/1", TypeWifi, uint32(StateActivated)},
 		"/org/freedesktop/NetworkManager/ActiveConnection/2": {"/org/freedesktop/NetworkManager/Settings/2", TypeVPN, uint32(StateActivating)},
 	} {
-		props(t, f.conn, path, prop.Map{ifaceActive: {
+		active := prop.Map{ifaceActive: {
 			"Connection": ro(a.profile),
 			"Type":       ro(a.typ),
 			"State":      ro(a.state),
-		}})
+		}}
+		// Only the primary connection carries an address here, which is
+		// also how NetworkManager behaves: the VPN coming up has no
+		// IP4Config yet.
+		if path == pathActiveWifi {
+			active[ifaceActive]["Ip4Config"] = ro(pathIP4)
+		}
+		props(t, f.conn, path, active)
 	}
+	props(t, f.conn, pathIP4, prop.Map{ifaceIP4: {
+		"AddressData": ro([]map[string]dbus.Variant{
+			{"address": dbus.MakeVariant("192.168.2.15"), "prefix": dbus.MakeVariant(uint32(24))},
+		}),
+	}})
 
 	reply, err := f.conn.RequestName(BusName, dbus.NameFlagDoNotQueue)
 	if err != nil || reply != dbus.RequestNameReplyPrimaryOwner {
@@ -225,6 +240,9 @@ func TestSnapshot(t *testing.T) {
 	if st.WifiDevice != pathWifi || !st.WifiEnabled || !st.WifiHardware || st.Wired {
 		t.Errorf("device %s enabled %t hardware %t wired %t; want %s true true false",
 			st.WifiDevice, st.WifiEnabled, st.WifiHardware, st.Wired, pathWifi)
+	}
+	if st.Address != "192.168.2.15" {
+		t.Errorf("Address = %q, want the primary connection's 192.168.2.15", st.Address)
 	}
 	if len(st.Networks) != 2 {
 		t.Fatalf("got %d networks, want 2: %+v", len(st.Networks), st.Networks)
@@ -355,5 +373,24 @@ func TestGone(t *testing.T) {
 		if got := gone(tc.err); got != tc.want {
 			t.Errorf("gone(%v) = %t, want %t", tc.err, got, tc.want)
 		}
+	}
+}
+
+// A laptop between networks routes through nothing, and NetworkManager
+// says so with the "/" path. That is an empty address and not an error:
+// the menu still has networks to list.
+func TestSnapshotWithNothingRouted(t *testing.T) {
+	c, f := startFake(t)
+	f.root.SetMust(ifaceRoot, "PrimaryConnection", noObject)
+
+	st, err := c.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if st.Address != "" {
+		t.Errorf("Address = %q, want empty with nothing routed", st.Address)
+	}
+	if len(st.Networks) != 2 {
+		t.Errorf("got %d networks, want the usual 2", len(st.Networks))
 	}
 }

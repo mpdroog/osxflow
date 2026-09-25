@@ -30,6 +30,9 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
+
+	"golang.org/x/sys/unix"
 )
 
 // Wire format. Every message is:
@@ -63,6 +66,40 @@ const (
 	toplevelHandleDestroy  = 7
 )
 
+// Requests the bar sends. Drawing needs five more interfaces than asking
+// what is open does; see layer.go for why each one is here.
+const (
+	compositorCreateSurface = 0 // wl_compositor.create_surface(new_id)
+
+	surfaceDestroy      = 0 // wl_surface.destroy()
+	surfaceAttach       = 1 // wl_surface.attach(buffer, x, y)
+	surfaceCommit       = 6
+	surfaceDamageBuffer = 9 // wl_surface.damage_buffer(x, y, w, h)
+
+	shmCreatePool    = 0 // wl_shm.create_pool(new_id, fd, size)
+	poolCreateBuffer = 0 // wl_shm_pool.create_buffer(new_id, offset, w, h, stride, format)
+	poolDestroy      = 1
+	bufferDestroy    = 0
+
+	shellGetLayerSurface = 0 // zwlr_layer_shell_v1.get_layer_surface(new_id, surface, output, layer, namespace)
+
+	shellSurfaceSetSize                  = 0
+	shellSurfaceSetAnchor                = 1
+	shellSurfaceSetExclusiveZone         = 2
+	shellSurfaceSetKeyboardInteractivity = 4
+	shellSurfaceAckConfigure             = 6
+	shellSurfaceDestroy                  = 7
+
+	viewporterGetViewport  = 1 // wp_viewporter.get_viewport(new_id, surface)
+	viewportDestroy        = 0
+	viewportSetDestination = 2 // wp_viewport.set_destination(width, height)
+
+	fracMgrGetFractionalScale = 1 // wp_fractional_scale_manager_v1.get_fractional_scale(new_id, surface)
+	fracDestroy               = 0
+
+	seatGetPointer = 0 // wl_seat.get_pointer(new_id)
+)
+
 // Event opcodes, per interface.
 const (
 	displayError    = 0
@@ -86,6 +123,38 @@ const (
 
 	outputGeometry = 0
 	outputName     = 4
+)
+
+// Event opcodes for the bar's interfaces.
+const (
+	seatCapabilities = 0
+
+	pointerEnter  = 0
+	pointerLeave  = 1
+	pointerMotion = 2
+	pointerButton = 3
+
+	shellSurfaceConfigure = 0
+	shellSurfaceClosed    = 1
+
+	bufferRelease = 0
+
+	fracPreferredScale = 0
+)
+
+// Versions the bar's globals are bound at. Each is the oldest that has
+// what is used here, so that a compositor offering no more than that still
+// works: layer shell 1 has the anchors and the exclusive zone, and
+// wl_compositor 4 is the last version where attach's x and y are still
+// allowed to be given (5 forbids anything but zero, which is what is sent
+// anyway).
+const (
+	compositorVersion = 4
+	shmVersion        = 1
+	layerShellVersion = 1
+	viewporterVersion = 1
+	fracVersion       = 1
+	seatVersion       = 1
 )
 
 // outputVersion is what we bind wl_output at. Version 4 is the first with
@@ -164,6 +233,10 @@ type Output struct {
 type Conn struct {
 	c net.Conn
 
+	// uc is c again, typed: passing a file descriptor to wl_shm needs
+	// SCM_RIGHTS, which is a Unix socket operation rather than a write.
+	uc *net.UnixConn
+
 	mu        sync.Mutex
 	nextID    uint32
 	reg       uint32
@@ -171,6 +244,28 @@ type Conn struct {
 	manager   uint32
 	toplevels map[uint32]*Toplevel
 	outputs   map[uint32]*Output
+
+	// The globals a bar needs, all zero on a compositor that offers none
+	// of them -- which is not an error until a bar is actually asked for.
+	compositor uint32
+	shm        uint32
+	layerShell uint32
+	viewporter uint32
+	fracMgr    uint32
+	pointer    uint32
+
+	// Bars by the object id each kind of event arrives on, because a
+	// Wayland event says only which object it is about.
+	bars     map[uint32]*Bar // by zwlr_layer_surface_v1
+	surfaces map[uint32]*Bar // by wl_surface, for pointer enter
+	fracs    map[uint32]*Bar // by wp_fractional_scale_v1
+	buffers  map[uint32]*buffer
+
+	// pointerOn is the bar the pointer is over, from the last enter.
+	pointerOn *Bar
+
+	events  chan Event
+	dropped atomic.Int64
 
 	// outputNames maps a wl_registry global name to the wl_output object
 	// bound for it, so that a monitor being unplugged -- the one global
@@ -208,13 +303,20 @@ func Dial() (*Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connecting to the compositor at %s: %w", sock, err)
 	}
+	uc, _ := c.(*net.UnixConn) // always a Unix socket; nil only makes fd passing fail loudly
 	conn := &Conn{
 		c:           c,
+		uc:          uc,
 		nextID:      1, // 1 is wl_display; allocation starts at 2
 		toplevels:   make(map[uint32]*Toplevel),
 		outputs:     make(map[uint32]*Output),
 		outputNames: make(map[uint32]uint32),
 		pending:     make(map[uint32]chan struct{}),
+		bars:        make(map[uint32]*Bar),
+		surfaces:    make(map[uint32]*Bar),
+		fracs:       make(map[uint32]*Bar),
+		buffers:     make(map[uint32]*buffer),
+		events:      make(chan Event, eventBuffer),
 		done:        make(chan struct{}),
 	}
 
@@ -296,6 +398,46 @@ func (c *Conn) Toplevels() ([]Toplevel, error) {
 		out = append(out, w)
 	}
 	return out, nil
+}
+
+// Active is the toplevel that has the keyboard, and whether anything
+// does. A compositor with nothing focused -- the pointer on the desktop --
+// is the false case, and is normal rather than an error.
+func (c *Conn) Active() (Toplevel, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := len(c.order) - 1; i >= 0; i-- {
+		t, ok := c.toplevels[c.order[i]]
+		if ok && t.seen && t.Activated {
+			return *t, true
+		}
+	}
+	return Toplevel{}, false
+}
+
+// Outputs returns every monitor the compositor has.
+//
+// They are sorted by position, which puts them left to right on a
+// compositor that reports one. labwc does not: wl_output.geometry gives
+// 0,0 for every monitor there, and the real layout position is in
+// zxdg_output_manager_v1, which this client does not bind. The order is
+// then the order the globals arrived in, which is stable within a session
+// and means nothing across one. A caller that needs to know which monitor
+// is which should use Name, as the bar does.
+func (c *Conn) Outputs() []Output {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]Output, 0, len(c.outputs))
+	for _, o := range c.outputs {
+		out = append(out, *o)
+	}
+	slices.SortFunc(out, func(a, b Output) int {
+		if a.X != b.X {
+			return a.X - b.X
+		}
+		return a.Y - b.Y
+	})
+	return out
 }
 
 // ActiveOutput returns the monitor the user is working on: the one holding
@@ -438,6 +580,17 @@ func argString(s string) arg {
 	}
 }
 
+// argInt appends one of the protocol's signed 32-bit arguments.
+func argInt(v int) arg {
+	return func(b *[]byte) {
+		//nolint:gosec // the protocol's int is a signed 32-bit word, which is the truncation asked for
+		*b = binary.LittleEndian.AppendUint32(*b, uint32(int32(v)))
+	}
+}
+
+// le32 reads one of the protocol's 32-bit words out of an event body.
+func le32(b []byte) uint32 { return binary.LittleEndian.Uint32(b) }
+
 func (c *Conn) send(obj uint32, opcode uint16, args ...arg) error {
 	buf := make([]byte, headerLen, headerLen+32)
 	for _, a := range args {
@@ -453,6 +606,37 @@ func (c *Conn) send(obj uint32, opcode uint16, args ...arg) error {
 	}
 	if _, err := c.c.Write(buf); err != nil {
 		return fmt.Errorf("writing to the compositor: %w", err)
+	}
+	return nil
+}
+
+// sendFD is send with a file descriptor attached.
+//
+// Wayland passes descriptors out of band: the fd is not in the message at
+// all, and the compositor takes the next one off the socket when it reads
+// a request whose signature says there is one. So the message and its
+// descriptor must go in a single sendmsg -- splitting them pairs the fd
+// with whatever request happens to be next, which is a protocol error at
+// best and a compositor reading the wrong file at worst.
+func (c *Conn) sendFD(obj uint32, opcode uint16, fd int, args ...arg) error {
+	buf := make([]byte, headerLen, headerLen+32)
+	for _, a := range args {
+		a(&buf)
+	}
+	binary.LittleEndian.PutUint32(buf[0:4], obj)
+	binary.LittleEndian.PutUint32(buf[4:8], uint32(len(buf))<<16|uint32(opcode))
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err != nil {
+		return c.err
+	}
+	if c.uc == nil {
+		return errors.New("the compositor connection is not a Unix socket, so no memory can be shared")
+	}
+	rights := unix.UnixRights(fd)
+	if _, _, err := c.uc.WriteMsgUnix(buf, rights, nil); err != nil {
+		return fmt.Errorf("sending a file descriptor to the compositor: %w", err)
 	}
 	return nil
 }
@@ -506,8 +690,13 @@ func (c *Conn) dispatch(obj uint32, opcode uint16, body []byte, registry uint32)
 
 	c.mu.Lock()
 	isManager := obj == c.manager
+	isSeat := obj == c.seat
+	isPointer := c.pointer != 0 && obj == c.pointer
 	_, isToplevel := c.toplevels[obj]
 	_, isOutput := c.outputs[obj]
+	_, isBar := c.bars[obj]
+	_, isFrac := c.fracs[obj]
+	_, isBuffer := c.buffers[obj]
 	ch, isCallback := c.pending[obj]
 	if isCallback {
 		delete(c.pending, obj)
@@ -523,6 +712,16 @@ func (c *Conn) dispatch(obj uint32, opcode uint16, body []byte, registry uint32)
 		c.toplevel(obj, opcode, body)
 	case isOutput:
 		c.output(obj, opcode, body)
+	case isBar:
+		c.layerSurface(obj, opcode, body)
+	case isFrac:
+		c.fractionalScale(obj, opcode, body)
+	case isBuffer:
+		c.bufferReleased(obj, opcode)
+	case isPointer:
+		c.pointerEvent(opcode, body)
+	case isSeat:
+		c.seatEvent(opcode, body)
 	}
 }
 
@@ -562,8 +761,9 @@ func (c *Conn) registry(opcode uint16, body []byte) {
 
 	switch iface {
 	case "wl_seat":
-		// Version 1 is enough: we only ever pass the seat back as an
-		// argument to activate, and never listen to it.
+		// Version 1 is enough: the seat is passed back as an argument to
+		// activate, and listened to for one event -- capabilities, which
+		// is how a pointer is found and is in version 1.
 		id := c.alloc()
 		c.mu.Lock()
 		if c.seat != 0 {
@@ -572,7 +772,17 @@ func (c *Conn) registry(opcode uint16, body []byte) {
 		}
 		c.seat = id
 		c.mu.Unlock()
-		_ = c.send(c.reg, registryBind, argUint(name), argString(iface), argUint(1), argUint(id))
+		_ = c.send(c.reg, registryBind, argUint(name), argString(iface), argUint(seatVersion), argUint(id))
+	case "wl_compositor":
+		c.bindOnce(name, iface, version, compositorVersion, &c.compositor)
+	case "wl_shm":
+		c.bindOnce(name, iface, version, shmVersion, &c.shm)
+	case "zwlr_layer_shell_v1":
+		c.bindOnce(name, iface, version, layerShellVersion, &c.layerShell)
+	case "wp_viewporter":
+		c.bindOnce(name, iface, version, viewporterVersion, &c.viewporter)
+	case "wp_fractional_scale_manager_v1":
+		c.bindOnce(name, iface, version, fracVersion, &c.fracMgr)
 	case "zwlr_foreign_toplevel_manager_v1":
 		// Bind at most 3: version 3 adds the parent event, which we ignore
 		// but must not be surprised by. Asking for more than the
@@ -608,6 +818,27 @@ func (c *Conn) registry(opcode uint16, body []byte) {
 	}
 }
 
+// bindOnce binds a global there is only ever one of.
+//
+// The version asked for is the oldest that has everything used here, not
+// the newest the compositor offers: a newer one only adds events this
+// client would have to know to ignore, and asking for more than is offered
+// is a protocol error that kills the connection.
+func (c *Conn) bindOnce(name uint32, iface string, offered, want uint32, dst *uint32) {
+	if want > offered {
+		want = offered
+	}
+	id := c.alloc()
+	c.mu.Lock()
+	if *dst != 0 {
+		c.mu.Unlock()
+		return
+	}
+	*dst = id
+	c.mu.Unlock()
+	_ = c.send(c.reg, registryBind, argUint(name), argString(iface), argUint(want), argUint(id))
+}
+
 // globalGone forgets an output that has been unplugged.
 //
 // Monitors are the one global this client binds that really does come and
@@ -629,6 +860,9 @@ func (c *Conn) globalGone(body []byte) {
 		delete(c.outputNames, name)
 	}
 	c.mu.Unlock()
+	if ok {
+		c.emit(Monitor{})
+	}
 	if ok && ver >= outputReleaseSince {
 		// The proxy is ours to destroy once the global is gone -- from
 		// version 3, which is where wl_output.release was added; asking an
@@ -706,12 +940,25 @@ func (c *Conn) toplevel(obj uint32, opcode uint16, body []byte) {
 		// the most recently raised" assumption holds.
 		if t.Activated && !wasActive {
 			c.raise(obj)
+			c.emit(Focus{})
 		}
 	case handleDone:
+		// The first done is where a window stops being half-described.
+		// One that is already focused by then -- the window open when
+		// this client started -- has had no state event a caller could
+		// have noticed, so this is the only announcement of it.
+		first := !t.seen
 		t.seen = true
+		if first && t.Activated {
+			c.emit(Focus{})
+		}
 	case handleClosed:
+		wasActive := t.Activated
 		delete(c.toplevels, obj)
 		c.forget(obj)
+		if wasActive {
+			c.emit(Focus{})
+		}
 		// The handle is ours to destroy once the compositor is done with it.
 		go func() { _ = c.send(obj, toplevelHandleDestroy) }()
 	}
@@ -743,6 +990,11 @@ func (c *Conn) output(obj uint32, opcode uint16, body []byte) {
 		o.Y = int(int32(binary.LittleEndian.Uint32(body[4:8])))
 	case outputName:
 		o.Name, _ = readString(body)
+		// A monitor is worth announcing once it has a name, not when its
+		// global arrives: a bar placed on a nameless output cannot be
+		// matched to XWayland's idea of the same monitor, and the name is
+		// the last of the describing events to come.
+		c.emit(Monitor{})
 	}
 }
 

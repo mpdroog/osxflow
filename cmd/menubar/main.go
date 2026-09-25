@@ -20,6 +20,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -34,6 +35,7 @@ import (
 	"github.com/mpdroog/osxflow/internal/menu"
 	"github.com/mpdroog/osxflow/internal/sni"
 	"github.com/mpdroog/osxflow/internal/text"
+	"github.com/mpdroog/osxflow/internal/wl"
 	"github.com/mpdroog/osxflow/internal/xwin"
 )
 
@@ -59,14 +61,21 @@ type app struct {
 	host  *menu.Host
 	bus   *dbus.Conn
 	props *xwin.Props
-	m     *metrics
 
-	win   *menu.Window
-	width int
+	// screens is one bar per monitor under Wayland, and exactly one bar
+	// under X11. See screen.go for what a monitor of its own costs.
+	screens []*screen
 
-	regular, bold font.Face
-	tux           *image.RGBA
-	macmenu       string
+	// art is the fonts and Tux, cached by the scale they were rasterised
+	// at and shared between monitors that agree on one.
+	art map[float64]*artwork
+
+	// wl is the compositor connection, or nil under X11. See wayland.go
+	// for why the strip is the one part of menubar that could not stay an
+	// X window.
+	wl *wl.Conn
+
+	macmenu string
 
 	// calendar is the page the clock opens, or "" for none.
 	calendar string
@@ -81,11 +90,6 @@ type app struct {
 	activeAtom xproto.Atom
 	appName    string
 	clock      string
-
-	slots   []slot
-	hover   int
-	pointer image.Point
-	dirty   bool
 
 	fetches chan fetched
 	menus   chan openMenu
@@ -141,28 +145,24 @@ func start() error {
 		host:     host,
 		bus:      bus,
 		props:    xwin.NewProps(xu.Conn()),
-		m:        newMetrics(host.Theme.Scale),
+		art:      map[float64]*artwork{},
 		watcher:  watcher,
 		calendar: *calendarFlag,
 		items:    map[sni.Ref]*trayItem{},
-		hover:    -1,
-		pointer:  image.Pt(-1, -1),
 		fetches:  make(chan fetched, 16),
 		menus:    make(chan openMenu, 4),
 		errs:     make(chan error, 16),
 	}
-	closeFaces, err := a.loadFaces()
-	if err != nil {
-		return err
-	}
-	defer closeFaces()
-	if a.tux, err = loadTux(a.m.tux); err != nil {
-		return err
-	}
+	defer a.closeArtwork()
 	if a.macmenu, err = sibling("macmenu"); err != nil {
 		return err
 	}
-	if a.windows, err = xwin.NewX11With(xu); err != nil {
+	// NewServerWith, not NewX11With: under labwc the X11 implementation
+	// fails at the first read, because XWayland has no idea which
+	// Wayland-native windows exist and so labwc publishes no
+	// _NET_CLIENT_LIST at all. That is what left the focused
+	// application's name blank on this desk.
+	if a.windows, err = xwin.NewServerWith(xu); err != nil {
 		return err
 	}
 	apps, problems := desktop.Scan()
@@ -171,39 +171,59 @@ func start() error {
 	}
 	a.index = launch.NewIndex(apps)
 
-	if err := a.createBar(); err != nil {
-		return err
-	}
-	if err := a.watchFocus(); err != nil {
-		// The bar works without the application's name.
-		log.Printf("%v; the focused application's name will not be shown", err)
+	if os.Getenv("WAYLAND_DISPLAY") != "" {
+		if a.wl, err = wl.Dial(); err != nil {
+			return err
+		}
+		defer func() {
+			a.closeScreens()
+			if closeErr := a.wl.Disconnect(); closeErr != nil {
+				log.Printf("disconnecting from the compositor: %v", closeErr)
+			}
+		}()
+		// A bar on every monitor, the way macOS has one on every display.
+		a.syncScreens()
+		if len(a.screens) == 0 {
+			return errNoMonitors
+		}
+		a.updateApp()
+	} else {
+		s, err := a.newX11Screen(host.Theme.Scale)
+		if err != nil {
+			return err
+		}
+		a.screens = []*screen{s}
+		if err := a.watchFocus(); err != nil {
+			// The bar works without the application's name.
+			log.Printf("%v; the focused application's name will not be shown", err)
+		}
 	}
 	return a.loop()
 }
 
-// loadFaces loads the regular and bold faces, and returns what closes
-// them.
-func (a *app) loadFaces() (func(), error) {
+// loadFaces rasterises the regular and bold faces at one size, and
+// returns what closes them.
+func loadFaces(pt float64) (regularFace, boldFace font.Face, closeFaces func(), err error) {
 	regular, _, err := text.Load(text.Candidates)
 	if err != nil {
-		return nil, fmt.Errorf("loading regular font: %w", err)
+		return nil, nil, nil, fmt.Errorf("loading regular font: %w", err)
 	}
 	bold, _, err := text.Load(text.BoldCandidates)
 	if err != nil {
 		log.Printf("no bold font, using regular: %v", err)
 		bold = regular
 	}
-	if a.regular, err = text.Face(regular, a.m.textPt); err != nil {
-		return nil, fmt.Errorf("regular face: %w", err)
+	if regularFace, err = text.Face(regular, pt); err != nil {
+		return nil, nil, nil, fmt.Errorf("regular face: %w", err)
 	}
-	if a.bold, err = text.Face(bold, a.m.textPt); err != nil {
-		if closeErr := a.regular.Close(); closeErr != nil {
+	if boldFace, err = text.Face(bold, pt); err != nil {
+		if closeErr := regularFace.Close(); closeErr != nil {
 			log.Printf("closing the regular face: %v", closeErr)
 		}
-		return nil, fmt.Errorf("bold face: %w", err)
+		return nil, nil, nil, fmt.Errorf("bold face: %w", err)
 	}
-	return func() {
-		for _, f := range []font.Face{a.regular, a.bold} {
+	return regularFace, boldFace, func() {
+		for _, f := range []font.Face{regularFace, boldFace} {
 			if err := f.Close(); err != nil {
 				log.Printf("closing a font face: %v", err)
 			}
@@ -252,7 +272,7 @@ func (a *app) updateApp() {
 	}
 	if name != a.appName {
 		a.appName = name
-		a.relayout()
+		a.relayoutAll()
 	}
 }
 
@@ -260,19 +280,9 @@ func (a *app) updateApp() {
 // name from its .desktop entry, or its WM_CLASS when it has none, or ""
 // when the focus is on the desktop, a panel or nothing.
 func (a *app) focusedApp() (string, error) {
-	reply, err := xwin.GetProperty(a.conn, a.root, a.activeAtom, "_NET_ACTIVE_WINDOW")
-	if errors.Is(err, xwin.ErrPropUnset) {
-		return "", nil
-	}
-	if err != nil {
+	id, err := a.activeWindow()
+	if err != nil || id == 0 {
 		return "", err
-	}
-	id, err := xwin.DecodeCard32(reply)
-	if err != nil {
-		return "", fmt.Errorf("_NET_ACTIVE_WINDOW: %w", err)
-	}
-	if id == 0 {
-		return "", nil
 	}
 	wins, err := a.windows.Windows()
 	if err != nil {
@@ -296,11 +306,42 @@ func (a *app) focusedApp() (string, error) {
 	return "", nil
 }
 
+// activeWindow is the id of the window that has the keyboard, or 0 when
+// nothing does.
+//
+// The two display servers answer this from different places and neither
+// can answer for the other: _NET_ACTIVE_WINDOW names an X window, and
+// under labwc it can only ever name an XWayland one, so a Wayland-native
+// window being focused looks exactly like nothing being focused. The
+// compositor's own answer covers both, since XWayland's windows are
+// toplevels to it like any other.
+func (a *app) activeWindow() (uint32, error) {
+	if a.wl != nil {
+		t, ok := a.wl.Active()
+		if !ok {
+			return 0, nil
+		}
+		return t.ID, nil
+	}
+	reply, err := xwin.GetProperty(a.conn, a.root, a.activeAtom, "_NET_ACTIVE_WINDOW")
+	if errors.Is(err, xwin.ErrPropUnset) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	id, err := xwin.DecodeCard32(reply)
+	if err != nil {
+		return 0, fmt.Errorf("_NET_ACTIVE_WINDOW: %w", err)
+	}
+	return id, nil
+}
+
 // tick updates the clock and says when to next look.
 func (a *app) tick(now time.Time) time.Duration {
 	if s := now.Format("Mon 2006-01-02 15:04"); s != a.clock {
 		a.clock = s
-		a.relayout()
+		a.relayoutAll()
 	}
 	// Timers stop during suspend; a short cap puts the time right soon
 	// after waking rather than up to a minute later.
@@ -326,6 +367,8 @@ func (a *app) loop() error {
 		select {
 		case ev := <-events:
 			a.handleX(ev)
+		case e := <-a.wlEvents():
+			a.handleWayland(e)
 		case err := <-xGone:
 			return err
 		case <-a.watcher.Changes():
@@ -345,23 +388,22 @@ func (a *app) loop() error {
 		case now := <-clock.C:
 			clock.Reset(a.tick(now))
 		}
-		if a.dirty {
-			if err := a.paint(); err != nil {
-				log.Printf("drawing the bar: %v", err)
-			}
-		}
+		a.paintDirty()
 	}
 }
 
 func (a *app) handleX(ev xgb.Event) {
+	// Under Wayland every one of these but the menus' own events belongs
+	// to a window this process no longer has.
+	bar := a.x11Screen()
 	switch e := ev.(type) {
 	case xproto.ExposeEvent:
-		if e.Window != a.win.ID {
+		if bar == nil || e.Window != bar.win.ID {
 			a.handleMenu(ev)
 			return
 		}
 		if e.Count == 0 {
-			if err := a.win.Surf.Copy(); err != nil {
+			if err := bar.win.Surf.Copy(); err != nil {
 				log.Printf("drawing the bar: %v", err)
 			}
 		}
@@ -370,19 +412,21 @@ func (a *app) handleX(ev xgb.Event) {
 			a.updateApp()
 		}
 	case xproto.MotionNotifyEvent:
-		if a.host.IsOpen() {
+		if a.host.IsOpen() || bar == nil {
 			a.handleMenu(ev)
 			return
 		}
-		a.hoverAt(image.Pt(int(e.EventX), int(e.EventY)))
+		a.hoverAt(bar, image.Pt(int(e.EventX), int(e.EventY)))
 	case xproto.LeaveNotifyEvent:
-		a.hoverAt(image.Pt(-1, -1))
+		if bar != nil {
+			a.hoverAt(bar, image.Pt(-1, -1))
+		}
 	case xproto.ButtonPressEvent:
-		if a.host.IsOpen() {
+		if a.host.IsOpen() || bar == nil {
 			a.handleMenu(ev)
 			return
 		}
-		a.press(e)
+		a.press(bar, image.Pt(int(e.EventX), int(e.EventY)), e.Detail)
 	case xproto.ButtonReleaseEvent, xproto.KeyPressEvent:
 		a.handleMenu(ev)
 	}
@@ -394,37 +438,56 @@ func (a *app) handleMenu(ev xgb.Event) {
 	}
 }
 
-func (a *app) hoverAt(p image.Point) {
-	a.pointer = p
-	hover := at(a.slots, p, a.m.height)
-	if hover != a.hover {
-		a.hover = hover
-		a.dirty = true
+// x11Screen is the single X11 bar, or nil in a Wayland session.
+func (a *app) x11Screen() *screen {
+	if len(a.screens) == 1 && a.screens[0].win != nil {
+		return a.screens[0]
+	}
+	return nil
+}
+
+func (a *app) hoverAt(s *screen, p image.Point) {
+	s.pointer = p
+	hover := at(s.slots, p, s.m.height)
+	if hover != s.hover {
+		s.hover = hover
+		s.dirty = true
 	}
 }
 
-func (a *app) press(e xproto.ButtonPressEvent) {
-	i := at(a.slots, image.Pt(int(e.EventX), int(e.EventY)), a.m.height)
+func (a *app) press(sc *screen, p image.Point, detail xproto.Button) {
+	i := at(sc.slots, p, sc.m.height)
 	if i < 0 {
 		return
 	}
-	s := &a.slots[i]
+	s := &sc.slots[i]
 	switch s.kind {
 	case slotMenu:
-		if e.Detail != xproto.ButtonIndex1 {
+		if detail != xproto.ButtonIndex1 {
 			return
 		}
-		app := &desktop.App{Name: "macmenu", Argv: []string{a.macmenu}}
+		// Tux's own x, so the menu opens under the bar that was clicked.
+		// macmenu is a separate process with no idea which monitor it was
+		// summoned from, and under Wayland it cannot find out: the
+		// pointer it would otherwise ask stopped being meaningful when
+		// the cursor last left an X window.
+		x := sc.screenX(s.r.Min.X + s.r.Dx()/2)
+		app := &desktop.App{Name: "macmenu", Argv: []string{a.macmenu, "-x", strconv.Itoa(x)}}
 		if err := launch.SpawnDetached(app); err != nil {
 			log.Printf("opening macmenu: %v", err)
 		}
 	case slotItem:
-		a.clickItem(a.shown[s.item], e.Detail, s.r.Min.X+s.r.Dx()/2)
+		a.clickItem(a.shown[s.item], detail, sc, sc.screenX(s.r.Min.X+s.r.Dx()/2))
 	case slotClock:
-		if e.Detail != xproto.ButtonIndex1 || a.calendar == "" {
+		if detail != xproto.ButtonIndex1 || a.calendar == "" {
 			return
 		}
-		app := &desktop.App{Name: "firefox", Argv: []string{"firefox", a.calendar}}
+		// xdg-open, not firefox: Firefox here is a flatpak, so there is no
+		// firefox binary in PATH and naming one failed the click silently
+		// but for a line in a log nobody reads. The handler the desktop is
+		// configured with is the right answer anyway, and it is what the
+		// dock already uses to open a file.
+		app := &desktop.App{Name: "calendar", Argv: []string{"xdg-open", a.calendar}}
 		if err := launch.SpawnDetached(app); err != nil {
 			log.Printf("opening the calendar: %v", err)
 		}

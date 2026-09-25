@@ -43,7 +43,11 @@ type trayItem struct {
 	owner string
 
 	state sni.State
-	icon  *image.RGBA
+
+	// icons is the item drawn at each scale a bar needs it at, made on
+	// demand and thrown away whenever the item sends new pixels. Two
+	// monitors at the same scale share one; this desk's two do not.
+	icons map[float64]*image.RGBA
 
 	// ready is set once the first fetch has come back: an item is not
 	// drawn before there is anything to draw.
@@ -89,7 +93,7 @@ func (a *app) syncItems() {
 		a.fetch(it)
 	}
 	a.refs = slices.DeleteFunc(a.refs, func(r sni.Ref) bool { _, ok := a.items[r]; return !ok })
-	a.relayout()
+	a.relayoutAll()
 }
 
 // fetch reads an item's properties again.
@@ -130,8 +134,10 @@ func (a *app) applyFetch(res *fetched) {
 	}
 	it.state = res.state
 	it.ready = true
-	it.icon = a.itemIcon(&it.state)
-	a.relayout()
+	// New pixels: whatever was drawn from the old ones, at whatever
+	// scales, is stale.
+	it.icons = nil
+	a.relayoutAll()
 }
 
 // itemChanged refetches the item a signal came from.
@@ -143,12 +149,29 @@ func (a *app) itemChanged(sender, path string) {
 	}
 }
 
-// itemIcon draws an item's icon at the bar's icon size: its own pixels
+// itemIcon draws an item's icon at one bar's icon size: its own pixels
 // when it sent any, or else its initial. Icons by theme name are not
 // looked up -- the theme is SVG, which cannot be drawn without cgo -- and
 // no item here uses one.
-func (a *app) itemIcon(s *sni.State) *image.RGBA {
-	size := a.m.icon
+//
+// The result is kept per scale. Drawing it again for every frame would
+// rescale a pixmap on each repaint, and drawing it once for the whole
+// application would put the 4K monitor's icon on the ultrawide's bar.
+func (a *app) itemIcon(it *trayItem, sc *screen) *image.RGBA {
+	if img, ok := it.icons[sc.m.scale]; ok {
+		return img
+	}
+	img := a.drawItemIcon(&it.state, sc)
+	if it.icons == nil {
+		it.icons = map[float64]*image.RGBA{}
+	}
+	it.icons[sc.m.scale] = img
+	return img
+}
+
+// drawItemIcon is itemIcon's work, without the cache.
+func (a *app) drawItemIcon(s *sni.State, sc *screen) *image.RGBA {
+	size := sc.m.icon
 	src, problems := sni.Best(s.Icon, size)
 	if src != nil {
 		for _, p := range problems {
@@ -165,9 +188,9 @@ func (a *app) itemIcon(s *sni.State) *image.RGBA {
 		label = s.ID
 	}
 	if r, _ := utf8.DecodeRuneInString(label); r != utf8.RuneError {
-		m := a.bold.Metrics()
+		m := sc.art.bold.Metrics()
 		baseline := size/2 + (m.Ascent-m.Descent).Round()/2
-		text.DrawCentred(img, a.bold, colText, size/2, baseline, string(r), size)
+		text.DrawCentred(img, sc.art.bold, colText, size/2, baseline, string(r), size)
 	}
 	return img
 }
@@ -192,7 +215,7 @@ func fit(src *image.RGBA, size int) *image.RGBA {
 
 // clickItem acts on a press on an item. centreX is the middle of its
 // slot, where anything it opens goes.
-func (a *app) clickItem(it *trayItem, button xproto.Button, centreX int) {
+func (a *app) clickItem(it *trayItem, button xproto.Button, sc *screen, centreX int) {
 	s := &it.state
 	hasMenu := s.Menu != ""
 	var c sni.Click
@@ -222,7 +245,7 @@ func (a *app) clickItem(it *trayItem, button xproto.Button, centreX int) {
 	default:
 		return
 	}
-	c.X, c.Y = centreX, a.m.height
+	c.X, c.Y = centreX, sc.m.height
 	remote, menuPath := it.remote, s.Menu
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
