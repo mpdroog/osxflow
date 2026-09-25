@@ -245,3 +245,44 @@ func (d *dockApp) moveWindow(win xproto.Window, x, y int) {
 		xproto.ConfigWindowX|xproto.ConfigWindowY,
 		[]uint32{geom.I32AsU32(x), geom.I32AsU32(y)})
 }
+
+// damageTrigger draws one transparent rectangle into a reveal strip, which
+// is what makes the strip exist as far as the pointer is concerned.
+//
+// The strip is created InputOutput and mapped, and that is still not
+// enough under Wayland. XWayland attaches a Wayland buffer to an X window
+// the first time the window is *damaged*; a window that is never drawn
+// into is never damaged, so it never gets a buffer, and wlroots hit-tests
+// the pointer against the scene graph -- where a surface with no buffer is
+// nothing at all. The strip was therefore invisible to the pointer for the
+// same reason it was invisible to the eye, and the dock could only be
+// summoned by clicking the bottom edge, which reaches it by another route.
+//
+// Filling it with transparent black changes no pixel: the background is
+// already 0x00000000 and stays that way. The damage is the point, not the
+// colour. One rectangle is enough for the lifetime of the window, because
+// XWayland keeps the buffer until the window is unmapped and these are
+// mapped for as long as the dock runs.
+func (d *dockApp) damageTrigger(win xproto.Window, width, height int) error {
+	gc, err := xproto.NewGcontextId(d.conn)
+	if err != nil {
+		return fmt.Errorf("allocating a gcontext id: %w", err)
+	}
+	if gcErr := xproto.CreateGCChecked(d.conn, gc, xproto.Drawable(win),
+		xproto.GcForeground, []uint32{0x00000000}).Check(); gcErr != nil {
+		return fmt.Errorf("creating the trigger's gcontext: %w", gcErr)
+	}
+	// The gcontext has done its work once the fill is sent; keeping it
+	// would be a server resource held for the life of the process for the
+	// sake of a single request.
+	defer func() {
+		if freeErr := xproto.FreeGCChecked(d.conn, gc).Check(); freeErr != nil {
+			log.Printf("warning: freeing the trigger's gcontext: %v", freeErr)
+		}
+	}()
+	rect := []xproto.Rectangle{{X: 0, Y: 0, Width: geom.U16(width), Height: geom.U16(height)}}
+	if fillErr := xproto.PolyFillRectangleChecked(d.conn, xproto.Drawable(win), gc, rect).Check(); fillErr != nil {
+		return fmt.Errorf("damaging the reveal trigger: %w", fillErr)
+	}
+	return nil
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/jezek/xgb/xproto"
 
 	"github.com/mpdroog/osxflow/internal/geom"
+	"github.com/mpdroog/osxflow/internal/xmon"
 	"github.com/mpdroog/osxflow/internal/xwin"
 )
 
@@ -195,7 +196,49 @@ func (d *daemon) updateWorkArea() {
 	if err != nil {
 		log.Printf("work area: %v; using %v", err, area)
 	}
-	d.area = area
+	d.area = d.onActiveMonitor(area)
+}
+
+// onActiveMonitor narrows a work area that spans every monitor down to the
+// one the user is working on.
+//
+// _NET_WORKAREA describes the X screen, and the X screen is the union of
+// every monitor: on this desk that is 6000x1440, so its right-hand edge --
+// where a banner anchors itself -- is the right-hand edge of the *other*
+// display. The banners were drawn correctly and slid in perfectly, on a
+// screen nobody was looking at, which is indistinguishable from
+// notifications never arriving.
+//
+// Which monitor is active cannot be worked out here. The pointer is the
+// usual stand-in and is wrong twice over: the mouse is wherever it was
+// last left, which on two monitors is regularly not the one being typed
+// on, and under XWayland its position stops being updated the moment the
+// cursor leaves an X11 surface. So the display server is asked -- the
+// compositor under Wayland -- exactly as the launcher asks it, and the
+// connector name it answers with is resolved against RandR.
+//
+// Every failure falls back to the area it was given. A banner on the wrong
+// monitor is worth more than no banner.
+func (d *daemon) onActiveMonitor(area image.Rectangle) image.Rectangle {
+	if d.server == nil {
+		return area
+	}
+	name, err := d.server.ActiveMonitor()
+	if err != nil {
+		d.lim.Printf("monitor", "which monitor is active: %v; using the whole screen", err)
+		return area
+	}
+	m := xmon.For(d.conn, d.screen, name)
+	if m.W <= 0 || m.H <= 0 {
+		return area
+	}
+	// Intersected rather than replaced, so whatever the panel reserves
+	// along the top is still honoured on the monitor that was picked.
+	r := area.Intersect(image.Rect(m.X, m.Y, m.X+m.W, m.Y+m.H))
+	if r.Empty() {
+		return area
+	}
+	return r
 }
 
 // workArea is the screen minus what panels reserve, for the current

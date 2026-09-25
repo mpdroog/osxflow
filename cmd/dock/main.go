@@ -303,6 +303,16 @@ func (d *dockApp) createWindows() error {
 			return fmt.Errorf("mapping window 0x%x: %w", win, mapErr)
 		}
 	}
+
+	// Mapped is not enough: a strip that is never drawn into never becomes
+	// a Wayland surface the pointer can land on. One rectangle each, after
+	// the map, and the hover works. The triggers were appended in the order
+	// of d.mons, so the widths line up.
+	for i, win := range d.triggers {
+		if damageErr := d.damageTrigger(win, d.mons[i].W, triggerH); damageErr != nil {
+			return damageErr
+		}
+	}
 	return d.paint()
 }
 

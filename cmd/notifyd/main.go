@@ -29,6 +29,7 @@ import (
 	"github.com/mpdroog/osxflow/internal/notify"
 	"github.com/mpdroog/osxflow/internal/scale"
 	"github.com/mpdroog/osxflow/internal/xfconf"
+	"github.com/mpdroog/osxflow/internal/xwin"
 )
 
 // version is what GetServerInformation reports.
@@ -81,8 +82,17 @@ type daemon struct {
 	colormap xproto.Colormap
 	atoms    atoms
 
-	// area is the part of the screen not reserved by panels, which is what
-	// keeps the banners clear of the one along the top.
+	// server answers which monitor the user is working on -- the
+	// compositor under Wayland, the window manager under X11. See
+	// onActiveMonitor for why nothing here can work it out for itself.
+	//
+	// Nil when it could not be opened, which costs the placement and
+	// nothing else: banners fall back to the whole screen.
+	server xwin.Server
+
+	// area is the part of the screen not reserved by panels, narrowed to
+	// the monitor the user is working on, which is what keeps the banners
+	// clear of the one along the top and on the screen being looked at.
 	area image.Rectangle
 
 	th    *theme
@@ -158,6 +168,16 @@ func newDaemon(scaleOverride float64, verbose bool) (*daemon, error) {
 		verbose:        verbose,
 	}
 	d.screen = xproto.Setup(d.conn).DefaultScreen(d.conn)
+
+	// Opened before the first updateWorkArea below, which is what uses it.
+	// Not closed in close(): under X11 this shares the daemon's own
+	// connection, and closing it there would close the connection twice.
+	if server, serverErr := xwin.NewServerWith(X); serverErr != nil {
+		log.Printf("cannot tell which monitor is active; banners will use the "+
+			"whole screen: %v", serverErr)
+	} else {
+		d.server = server
+	}
 
 	// abandon undoes a half-made daemon. What cleaning up turns up is
 	// logged: the error being returned is the one that says why.
@@ -370,6 +390,13 @@ func (d *daemon) Notify(req *notify.Request) uint32 {
 	}
 	id := d.q.Notify(&n, req.ReplacesID, time.Now())
 	d.debugf("notify %d from %q: %q", id, n.AppName, n.Summary)
+	// A new stack starts on whichever monitor is active now. A stack that
+	// is already up stays where it is: moving banners to another screen
+	// underneath a reply the user is part-way through reading would be the
+	// wrong kind of helpful.
+	if len(d.banners) == 0 {
+		d.updateWorkArea()
+	}
 	d.sync()
 	return id
 }
