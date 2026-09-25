@@ -65,6 +65,7 @@ fuzz:
 	go test ./internal/sni    -run=XXX -fuzz=FuzzParseService     -fuzztime=10s
 	go test ./internal/sni    -run=XXX -fuzz=FuzzToImage          -fuzztime=20s
 	go test ./internal/dbusmenu -run=XXX -fuzz=FuzzLabel          -fuzztime=10s
+	go test ./cmd/osxflow-doctor -run=XXX -fuzz=FuzzParseGroup   -fuzztime=10s
 
 lint: errguard
 	gofmt -l .

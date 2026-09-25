@@ -2,6 +2,7 @@ package xfconf
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,6 +50,18 @@ func (f *fakeXfconfd) GetProperty(channel, property string) (dbus.Variant, *dbus
 	}
 }
 
+func (f *fakeXfconfd) GetAllProperties(channel, base string) (map[string]dbus.Variant, *dbus.Error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]dbus.Variant{}
+	for k, v := range f.props {
+		if prop, ok := strings.CutPrefix(k, channel); ok && strings.HasPrefix(prop, base) {
+			out[prop] = v
+		}
+	}
+	return out, nil
+}
+
 // startXfconfd runs a fake xfconfd on a private bus and returns its
 // connection, from which the test emits signals, and a client.
 func startXfconfd(t *testing.T) (server *dbus.Conn, client *Client, clientConn *dbus.Conn) {
@@ -76,6 +89,27 @@ func TestGetReadsAProperty(t *testing.T) {
 	}
 	if v, err := client.Get("xfce4-notifyd", "/expire-timeout"); err != nil || v != int32(7) {
 		t.Errorf("expire-timeout = %#v, %v; want int32(7)", v, err)
+	}
+}
+
+func TestGetAllReadsABranch(t *testing.T) {
+	_, client, _ := startXfconfd(t)
+	got, err := client.GetAll("xfce4-notifyd", "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got["/do-not-disturb"] != true || got["/expire-timeout"] != int32(7) {
+		t.Errorf("GetAll = %#v", got)
+	}
+	if got, err := client.GetAll("xfce4-notifyd", "/expire"); err != nil || len(got) != 1 {
+		t.Errorf("GetAll /expire = %#v, %v", got, err)
+	}
+}
+
+func TestGetAllWithoutXfconfdIsErrNoXfconf(t *testing.T) {
+	client := New(dbustest.Conn(t, dbustest.Start(t)))
+	if _, err := client.GetAll("xfce4-session", "/"); !errors.Is(err, ErrNoXfconf) {
+		t.Fatalf("err = %v, want ErrNoXfconf", err)
 	}
 }
 

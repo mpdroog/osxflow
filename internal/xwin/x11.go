@@ -11,6 +11,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jezek/xgb/xproto"
 	"github.com/jezek/xgbutil"
@@ -98,13 +99,33 @@ func newX11(conn *xgbutil.XUtil, owned bool) (Server, error) {
 	// window manager does not provide it we are not going to be able to
 	// find or focus anything, and saying so now beats an empty app list
 	// that looks like a matching bug.
-	if _, err := x.windowList("_NET_CLIENT_LIST"); err != nil {
+	if err := x.awaitClientList(); err != nil {
 		if owned {
 			conn.Conn().Close()
 		}
 		return nil, fmt.Errorf("is the window manager EWMH-compliant? %w", err)
 	}
 	return x, nil
+}
+
+// wmStartupGrace is how long newX11 waits for the window manager to
+// publish _NET_CLIENT_LIST. Session autostart launches the dock and
+// menubar alongside the window manager, not after it, so at login the
+// property is routinely missing for a moment.
+const wmStartupGrace = 30 * time.Second
+
+// awaitClientList waits for _NET_CLIENT_LIST to exist. Only an unset
+// property is waited out: that is a window manager still starting. A
+// malformed one will not fix itself, so it fails at once.
+func (x *x11) awaitClientList() error {
+	deadline := time.Now().Add(wmStartupGrace)
+	for {
+		_, err := x.windowList("_NET_CLIENT_LIST")
+		if err == nil || !errors.Is(err, ErrPropUnset) || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 // Windows lists managed windows bottom-to-top in stacking order.
