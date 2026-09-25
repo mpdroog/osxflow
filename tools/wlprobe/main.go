@@ -55,16 +55,18 @@ func run() error {
 		return fmt.Errorf("the compositor reports no monitors")
 	}
 	bars := make(map[*wl.Bar]wl.Output)
+	defer func() {
+		for b, o := range bars {
+			if err := b.Close(); err != nil {
+				log.Printf("closing the bar on %s: %v", o.Name, err)
+			}
+		}
+	}()
 	for _, o := range outputs {
 		b, err := c.NewBar(o.ID, *height, "osxflow-wlprobe")
 		if err != nil {
 			return fmt.Errorf("bar on %s: %w", o.Name, err)
 		}
-		defer func() {
-			if err := b.Close(); err != nil {
-				log.Printf("closing the bar on %s: %v", o.Name, err)
-			}
-		}()
 		bars[b] = o
 		w, h := b.Size()
 		log.Printf("%s at %d,%d: bar %dx%d logical, scale %.3g", o.Name, o.X, o.Y, w, h, b.Scale())

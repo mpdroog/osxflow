@@ -139,7 +139,7 @@ func (c *Conn) seatEvent(opcode uint16, body []byte) {
 	c.pointer = id
 	seat := c.seat
 	c.mu.Unlock()
-	_ = c.send(seat, seatGetPointer, argUint(id))
+	c.sendOrFail(seat, seatGetPointer, argUint(id))
 }
 
 // pointerEvent turns wl_pointer's events into Motion, Leave and Button.

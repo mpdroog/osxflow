@@ -19,6 +19,7 @@ package xmon
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/randr"
@@ -52,10 +53,15 @@ func All(conn *xgb.Conn, screen *xproto.ScreenInfo) []Rect {
 	whole := []Rect{{X: 0, Y: 0, W: int(screen.WidthInPixels), H: int(screen.HeightInPixels)}}
 
 	if err := randr.Init(conn); err != nil {
+		log.Printf("RandR unavailable, treating the screen as one monitor: %v", err)
 		return whole
 	}
 	reply, err := randr.GetMonitors(conn, screen.Root, true).Reply()
-	if err != nil || reply == nil || len(reply.Monitors) == 0 {
+	if err != nil {
+		log.Printf("listing monitors, treating the screen as one: %v", err)
+		return whole
+	}
+	if reply == nil || len(reply.Monitors) == 0 {
 		return whole
 	}
 	var out []Rect
@@ -81,13 +87,17 @@ func All(conn *xgb.Conn, screen *xproto.ScreenInfo) []Rect {
 
 // atomName resolves a monitor's name atom.
 //
-// A server that will not answer leaves the monitor nameless, which is not
-// worth reporting: the rectangle is right either way, and the name only
-// matters to a caller matching this monitor against another display
+// A server that will not answer leaves the monitor nameless. That is
+// logged and not returned: the rectangle is right either way, and the name
+// only matters to a caller matching this monitor against another display
 // server's idea of the same one.
 func atomName(conn *xgb.Conn, atom xproto.Atom) string {
 	reply, err := xproto.GetAtomName(conn, atom).Reply()
-	if err != nil || reply == nil {
+	if err != nil {
+		log.Printf("naming monitor atom %d: %v", atom, err)
+		return ""
+	}
+	if reply == nil {
 		return ""
 	}
 	return reply.Name
@@ -120,10 +130,13 @@ func For(conn *xgb.Conn, screen *xproto.ScreenInfo, name string) Rect {
 	if m, ok := Named(mons, name); ok {
 		return m
 	}
-	if p, err := xproto.QueryPointer(conn, screen.Root).Reply(); err == nil && p != nil {
-		if m, ok := Containing(mons, int(p.RootX), int(p.RootY)); ok {
-			return m
-		}
+	x, y, err := Pointer(conn, screen.Root)
+	if err != nil {
+		log.Printf("finding the monitor under the pointer: %v", err)
+		return mons[0]
+	}
+	if m, ok := Containing(mons, x, y); ok {
+		return m
 	}
 	return mons[0]
 }
@@ -154,7 +167,7 @@ func Containing(mons []Rect, x, y int) (Rect, bool) {
 }
 
 // Pointer reports where the pointer is, in screen coordinates.
-func Pointer(conn *xgb.Conn, root xproto.Window) (int, int, error) {
+func Pointer(conn *xgb.Conn, root xproto.Window) (x, y int, err error) {
 	p, err := xproto.QueryPointer(conn, root).Reply()
 	if err != nil {
 		return 0, 0, fmt.Errorf("querying the pointer: %w", err)

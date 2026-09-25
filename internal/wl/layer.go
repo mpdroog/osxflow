@@ -199,7 +199,7 @@ func (b *Bar) Scale() float64 {
 func (b *Bar) Output() uint32 { return b.output }
 
 // deviceSize is the picture's size in real pixels.
-func (b *Bar) deviceSize() (int, int) {
+func (b *Bar) deviceSize() (w, h int) {
 	round := func(logical int) int {
 		return (logical*int(b.scale120) + scaleUnit/2) / scaleUnit
 	}
@@ -319,13 +319,14 @@ func (b *Bar) Flush() error {
 
 	p.write(buf, img.Pix)
 	w, h := img.Bounds().Dx(), img.Bounds().Dy()
-	if err := b.c.send(b.surface, surfaceAttach, argUint(buf.id), argInt(0), argInt(0)); err != nil {
+	const x, y = 0, 0 // the whole buffer, from its top left
+	if err := b.c.send(b.surface, surfaceAttach, argUint(buf.id), argInt(x), argInt(y)); err != nil {
 		return err
 	}
 	// damage_buffer, not damage: the argument is in the buffer's own
 	// pixels, which is the only one of the two that means anything when a
 	// viewport is scaling the result.
-	if err := b.c.send(b.surface, surfaceDamageBuffer, argInt(0), argInt(0), argInt(w), argInt(h)); err != nil {
+	if err := b.c.send(b.surface, surfaceDamageBuffer, argInt(x), argInt(y), argInt(w), argInt(h)); err != nil {
 		return err
 	}
 	if err := b.c.send(b.surface, surfaceCommit); err != nil {
@@ -398,7 +399,7 @@ func (c *Conn) layerSurface(obj uint32, opcode uint16, body []byte) {
 		// Acknowledged whether or not anything changed: an unacknowledged
 		// configure leaves the surface unmapped, which is a bar that never
 		// appears and never says why.
-		_ = c.send(obj, shellSurfaceAckConfigure, argUint(serial))
+		c.sendOrFail(obj, shellSurfaceAckConfigure, argUint(serial))
 		if resized {
 			c.emit(Configure{Bar: b, Width: w, Height: h})
 		}

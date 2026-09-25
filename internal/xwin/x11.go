@@ -409,7 +409,7 @@ func (x *x11) ActiveMonitor() (string, error) {
 // reparenting window manager is the frame and not the root, so the origin
 // has to be translated rather than read. A window destroyed in between
 // comes back wrapping ErrWindowGone.
-func (x *x11) centre(win xproto.Window) (int, int, error) {
+func (x *x11) centre(win xproto.Window) (cx, cy int, err error) {
 	conn := x.conn.Conn()
 	geom, err := xproto.GetGeometry(conn, xproto.Drawable(win)).Reply()
 	if err != nil {

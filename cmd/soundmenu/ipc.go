@@ -22,6 +22,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -94,7 +95,11 @@ func sendKey(action string) error {
 	if err != nil {
 		return fmt.Errorf("connecting to the session bus: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			log.Printf("closing the session bus: %v", closeErr)
+		}
+	}()
 
 	obj := conn.Object(ipcBusName, dbus.ObjectPath(ipcPath))
 	if err := obj.Call(ipcIface+".Key", 0, action).Store(); err != nil {

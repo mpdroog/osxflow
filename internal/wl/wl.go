@@ -22,6 +22,7 @@
 package wl
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -299,11 +300,15 @@ func Dial() (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	c, err := net.Dial("unix", sock)
+	var d net.Dialer
+	c, err := d.DialContext(context.Background(), "unix", sock)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to the compositor at %s: %w", sock, err)
 	}
-	uc, _ := c.(*net.UnixConn) // always a Unix socket; nil only makes fd passing fail loudly
+	uc, ok := c.(*net.UnixConn)
+	if !ok {
+		return nil, errors.Join(fmt.Errorf("%s is not a Unix socket", sock), c.Close())
+	}
 	conn := &Conn{
 		c:           c,
 		uc:          uc,
@@ -323,32 +328,27 @@ func Dial() (*Conn, error) {
 	registry := conn.alloc()
 	conn.reg = registry // set once, before readLoop starts, so reads need no lock
 	if err := conn.send(displayID, displayGetRegistry, argUint(registry)); err != nil {
-		c.Close()
-		return nil, err
+		return nil, errors.Join(err, c.Close())
 	}
 	go conn.readLoop(registry)
 
 	// Two roundtrips: the first delivers the globals, the second the
 	// toplevels that binding the manager caused the compositor to send.
 	if err := conn.roundtrip(); err != nil {
-		c.Close()
-		return nil, err
+		return nil, errors.Join(err, c.Close())
 	}
 	conn.mu.Lock()
 	manager, seat := conn.manager, conn.seat
 	conn.mu.Unlock()
 	if manager == 0 {
-		c.Close()
-		return nil, errors.New("the compositor does not offer " +
-			"zwlr_foreign_toplevel_management_v1, so no window list is available")
+		return nil, errors.Join(errors.New("the compositor does not offer "+
+			"zwlr_foreign_toplevel_management_v1, so no window list is available"), c.Close())
 	}
 	if seat == 0 {
-		c.Close()
-		return nil, errors.New("the compositor offers no wl_seat, so windows cannot be activated")
+		return nil, errors.Join(errors.New("the compositor offers no wl_seat, so windows cannot be activated"), c.Close())
 	}
 	if err := conn.roundtrip(); err != nil {
-		c.Close()
-		return nil, err
+		return nil, errors.Join(err, c.Close())
 	}
 	return conn, nil
 }
@@ -571,6 +571,7 @@ func argUint(v uint32) arg {
 
 func argString(s string) arg {
 	return func(b *[]byte) {
+		//nolint:gosec // bounded by maxMessage, which send checks before anything is written
 		*b = binary.LittleEndian.AppendUint32(*b, uint32(len(s)+1))
 		*b = append(*b, s...)
 		*b = append(*b, 0)
@@ -591,13 +592,45 @@ func argInt(v int) arg {
 // le32 reads one of the protocol's 32-bit words out of an event body.
 func le32(b []byte) uint32 { return binary.LittleEndian.Uint32(b) }
 
-func (c *Conn) send(obj uint32, opcode uint16, args ...arg) error {
+// lei32 reads one of the protocol's signed 32-bit words.
+func lei32(b []byte) int {
+	//nolint:gosec // the protocol's int is a signed 32-bit word, which is the reinterpretation asked for
+	return int(int32(le32(b)))
+}
+
+// maxMessage is the largest message libwayland accepts. The size field in
+// the header has 16 bits, but a compositor rejects anything over this.
+const maxMessage = 4096
+
+// message encodes one request: the header, then its arguments.
+func message(obj uint32, opcode uint16, args []arg) ([]byte, error) {
 	buf := make([]byte, headerLen, headerLen+32)
 	for _, a := range args {
 		a(&buf)
 	}
+	n := len(buf)
+	if n > maxMessage {
+		return nil, fmt.Errorf("request %d on object %d is %d bytes, over the protocol's %d", opcode, obj, n, maxMessage)
+	}
 	binary.LittleEndian.PutUint32(buf[0:4], obj)
-	binary.LittleEndian.PutUint32(buf[4:8], uint32(len(buf))<<16|uint32(opcode))
+	binary.LittleEndian.PutUint32(buf[4:8], uint32(n)<<16|uint32(opcode))
+	return buf, nil
+}
+
+// sendOrFail is send for requests made from the read loop, where there
+// is no caller to hand an error to. A write that fails means the socket
+// is gone, so the whole connection is failed and every waiter hears why.
+func (c *Conn) sendOrFail(obj uint32, opcode uint16, args ...arg) {
+	if err := c.send(obj, opcode, args...); err != nil {
+		c.fail(err)
+	}
+}
+
+func (c *Conn) send(obj uint32, opcode uint16, args ...arg) error {
+	buf, err := message(obj, opcode, args)
+	if err != nil {
+		return err
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -619,12 +652,10 @@ func (c *Conn) send(obj uint32, opcode uint16, args ...arg) error {
 // with whatever request happens to be next, which is a protocol error at
 // best and a compositor reading the wrong file at worst.
 func (c *Conn) sendFD(obj uint32, opcode uint16, fd int, args ...arg) error {
-	buf := make([]byte, headerLen, headerLen+32)
-	for _, a := range args {
-		a(&buf)
+	buf, err := message(obj, opcode, args)
+	if err != nil {
+		return err
 	}
-	binary.LittleEndian.PutUint32(buf[0:4], obj)
-	binary.LittleEndian.PutUint32(buf[4:8], uint32(len(buf))<<16|uint32(opcode))
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -772,7 +803,7 @@ func (c *Conn) registry(opcode uint16, body []byte) {
 		}
 		c.seat = id
 		c.mu.Unlock()
-		_ = c.send(c.reg, registryBind, argUint(name), argString(iface), argUint(seatVersion), argUint(id))
+		c.sendOrFail(c.reg, registryBind, argUint(name), argString(iface), argUint(seatVersion), argUint(id))
 	case "wl_compositor":
 		c.bindOnce(name, iface, version, compositorVersion, &c.compositor)
 	case "wl_shm":
@@ -799,7 +830,7 @@ func (c *Conn) registry(opcode uint16, body []byte) {
 		}
 		c.manager = id
 		c.mu.Unlock()
-		_ = c.send(c.reg, registryBind, argUint(name), argString(iface), argUint(want), argUint(id))
+		c.sendOrFail(c.reg, registryBind, argUint(name), argString(iface), argUint(want), argUint(id))
 	case "wl_output":
 		// Every one of them, not just the first: the question these are
 		// bound for is which of the monitors a window is on, which needs
@@ -814,7 +845,7 @@ func (c *Conn) registry(opcode uint16, body []byte) {
 		c.outputs[id] = &Output{ID: id, ver: want}
 		c.outputNames[name] = id
 		c.mu.Unlock()
-		_ = c.send(c.reg, registryBind, argUint(name), argString(iface), argUint(want), argUint(id))
+		c.sendOrFail(c.reg, registryBind, argUint(name), argString(iface), argUint(want), argUint(id))
 	}
 }
 
@@ -836,7 +867,7 @@ func (c *Conn) bindOnce(name uint32, iface string, offered, want uint32, dst *ui
 	}
 	*dst = id
 	c.mu.Unlock()
-	_ = c.send(c.reg, registryBind, argUint(name), argString(iface), argUint(want), argUint(id))
+	c.sendOrFail(c.reg, registryBind, argUint(name), argString(iface), argUint(want), argUint(id))
 }
 
 // globalGone forgets an output that has been unplugged.
@@ -868,7 +899,7 @@ func (c *Conn) globalGone(body []byte) {
 		// version 3, which is where wl_output.release was added; asking an
 		// older one would be a protocol error. Sent unlocked, because send
 		// takes the same lock.
-		_ = c.send(id, outputRelease)
+		c.sendOrFail(id, outputRelease)
 	}
 }
 
@@ -923,13 +954,13 @@ func (c *Conn) toplevel(obj uint32, opcode uint16, body []byte) {
 		}
 		n := int(binary.LittleEndian.Uint32(body[0:4]))
 		vals := body[4:]
-		if n > len(vals) {
-			n = len(vals)
+		if n < len(vals) {
+			vals = vals[:n]
 		}
 		wasActive := t.Activated
 		t.Activated, t.Minimized = false, false
-		for i := 0; i+4 <= n; i += 4 {
-			switch binary.LittleEndian.Uint32(vals[i : i+4]) {
+		for ; len(vals) >= 4; vals = vals[4:] {
+			switch le32(vals) {
 			case stateActivated:
 				t.Activated = true
 			case stateMinimized:
@@ -960,7 +991,7 @@ func (c *Conn) toplevel(obj uint32, opcode uint16, body []byte) {
 			c.emit(Focus{})
 		}
 		// The handle is ours to destroy once the compositor is done with it.
-		go func() { _ = c.send(obj, toplevelHandleDestroy) }()
+		go c.sendOrFail(obj, toplevelHandleDestroy)
 	}
 }
 
@@ -986,8 +1017,8 @@ func (c *Conn) output(obj uint32, opcode uint16, body []byte) {
 		}
 		// Signed: an output left of or above the origin has negative
 		// coordinates, which is an ordinary two-monitor layout.
-		o.X = int(int32(binary.LittleEndian.Uint32(body[0:4])))
-		o.Y = int(int32(binary.LittleEndian.Uint32(body[4:8])))
+		o.X = lei32(body[0:4])
+		o.Y = lei32(body[4:8])
 	case outputName:
 		o.Name, _ = readString(body)
 		// A monitor is worth announcing once it has a name, not when its
@@ -1033,7 +1064,7 @@ func (c *Conn) fail(err error) {
 
 // readString decodes a length-prefixed, NUL-terminated, 4-byte-padded
 // string and returns it with whatever follows it.
-func readString(b []byte) (string, []byte) {
+func readString(b []byte) (s string, rest []byte) {
 	if len(b) < 4 {
 		return "", nil
 	}
@@ -1041,7 +1072,7 @@ func readString(b []byte) (string, []byte) {
 	if n == 0 || 4+n > len(b) {
 		return "", nil
 	}
-	s := string(b[4 : 4+n-1]) // drop the NUL
+	s = string(b[4 : 4+n-1]) // drop the NUL
 	adv := 4 + (n+3)&^3
 	if adv > len(b) {
 		return s, nil

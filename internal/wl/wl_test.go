@@ -79,7 +79,11 @@ func TestLiveCompositor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer c.Disconnect()
+	defer func() {
+		if cerr := c.Disconnect(); cerr != nil {
+			t.Errorf("Disconnect: %v", cerr)
+		}
+	}()
 
 	tops, err := c.Toplevels()
 	if err != nil {
@@ -124,9 +128,16 @@ func TestLiveActivate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer c.Disconnect()
+	defer func() {
+		if cerr := c.Disconnect(); cerr != nil {
+			t.Errorf("Disconnect: %v", cerr)
+		}
+	}()
 
-	tops, _ := c.Toplevels()
+	tops, err := c.Toplevels()
+	if err != nil {
+		t.Fatalf("Toplevels: %v", err)
+	}
 	// Prefer a window that is NOT already focused: activating the window
 	// that already has focus proves nothing, and would pass even if
 	// Activate did nothing at all.
@@ -140,19 +151,19 @@ func TestLiveActivate(t *testing.T) {
 	if target == nil {
 		t.Skipf("no UNfocused window whose app_id contains %q", want)
 	}
-	if target == nil {
-		t.Skipf("no window whose app_id contains %q", want)
-	}
 	t.Logf("activating 0x%x %q (activated=%v before)", target.ID, target.Title, target.Activated)
-	if err := c.Activate(target.ID); err != nil {
+	if err = c.Activate(target.ID); err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
 	// Give the compositor a moment, then re-read the state it reports.
 	time.Sleep(500 * time.Millisecond)
-	if err := c.roundtrip(); err != nil {
+	if err = c.roundtrip(); err != nil {
 		t.Fatalf("roundtrip: %v", err)
 	}
-	after, _ := c.Toplevels()
+	after, err := c.Toplevels()
+	if err != nil {
+		t.Fatalf("Toplevels: %v", err)
+	}
 	for _, w := range after {
 		if w.ID == target.ID {
 			t.Logf("after: activated=%v", w.Activated)
@@ -174,10 +185,17 @@ func TestLiveActivate(t *testing.T) {
 func newTestConn(t *testing.T) *Conn {
 	t.Helper()
 	ours, theirs := net.Pipe()
-	go io.Copy(io.Discard, theirs)
+	go func() {
+		// Ends with an error when Cleanup closes the pipe, which is the point.
+		_, _ = io.Copy(io.Discard, theirs) //nolint:errcheck // see above
+	}()
 	t.Cleanup(func() {
-		ours.Close()
-		theirs.Close()
+		if err := ours.Close(); err != nil {
+			t.Errorf("closing our end of the pipe: %v", err)
+		}
+		if err := theirs.Close(); err != nil {
+			t.Errorf("closing their end of the pipe: %v", err)
+		}
 	})
 	return &Conn{
 		c:           ours,

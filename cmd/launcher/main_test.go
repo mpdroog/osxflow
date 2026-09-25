@@ -134,12 +134,12 @@ func TestFocusedWindow(t *testing.T) {
 // not, because the thing that was launched has it.
 func TestRestoreFocusActivatesTheWindow(t *testing.T) {
 	server := &xwin.Fake{}
-	restoreFocus(server, xwin.Window{ID: 42})
+	restoreFocus(server, &xwin.Window{ID: 42})
 	if len(server.Activated) != 1 || server.Activated[0] != 42 {
 		t.Errorf("activated %v, want [42]", server.Activated)
 	}
 
 	// A window that has closed in the meantime is logged, not fatal.
 	failing := &xwin.Fake{ActivateErr: errors.New("no such window")}
-	restoreFocus(failing, xwin.Window{ID: 42})
+	restoreFocus(failing, &xwin.Window{ID: 42})
 }

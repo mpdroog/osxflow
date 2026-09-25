@@ -259,8 +259,16 @@ func (h *Host) anchorTop() int {
 
 // panelHeight is OSXFLOW_PANEL_HEIGHT in pixels, or 0 when unset or junk.
 func panelHeight() int {
-	v, err := strconv.Atoi(os.Getenv("OSXFLOW_PANEL_HEIGHT"))
-	if err != nil || v < 0 {
+	s := os.Getenv("OSXFLOW_PANEL_HEIGHT")
+	if s == "" {
+		return 0
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		log.Printf("ignoring OSXFLOW_PANEL_HEIGHT: %v", err)
+		return 0
+	}
+	if v < 0 {
 		return 0
 	}
 	return v

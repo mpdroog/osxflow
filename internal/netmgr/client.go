@@ -76,7 +76,10 @@ func (c *Client) Snapshot(ctx context.Context) (State, error) {
 	// older than 0.9.10 has no such property, and for the one thing it is
 	// wanted for -- an address to show -- a missing property and nothing
 	// routed come to the same empty answer.
-	primary, _ := value[dbus.ObjectPath](root, rootPath, "PrimaryConnection")
+	primary, primaryErr := value[dbus.ObjectPath](root, rootPath, "PrimaryConnection")
+	if primaryErr != nil {
+		primary = "" // unknown and unrouted are the same answer, as above
+	}
 	address, addressErr := c.address(ctx, primary)
 
 	st.Networks = Networks(aps, activeAP, saved, active)
