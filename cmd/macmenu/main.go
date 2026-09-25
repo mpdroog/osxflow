@@ -114,7 +114,7 @@ func start() error {
 			log.Printf("%v; opening the menu at the left edge", err)
 		}
 	}
-	if err := host.Open(a.x, mainRows(fullName(), a)); err != nil {
+	if err := host.Open(a.x, mainRows(fullName(), os.Getenv("WAYLAND_DISPLAY") != "", a)); err != nil {
 		return fmt.Errorf("opening the menu: %w", err)
 	}
 	return a.loop(closeReq, closeMenus)

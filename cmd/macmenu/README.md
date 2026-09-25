@@ -26,25 +26,27 @@ and exits.
 
 ## What the rows run
 
-On Alpine there is no XFCE and no elogind, so none of what this menu was
-first written against exists here -- `xfce4-session-logout`, `xflock4`,
-`xfce4-settings-manager`, `xfce4-taskmanager`. A row whose program is
-missing is the worst kind of dead: the menu closes and nothing happens,
-with the error going to a stderr nobody reads. So the rows are:
+The same binary runs under labwc on Alpine and under XFCE on the laptop,
+and the programs behind the rows share nothing between the two. A row
+whose program is missing is the worst kind of dead: the menu closes and
+nothing happens, with the error going to a stderr nobody reads. So the set
+is picked at runtime from `WAYLAND_DISPLAY`, like the display code:
 
-| Row | Command |
-| --- | --- |
-| Task Manager… | `foot -T "Task Manager" top` |
-| Sleep | `swaylock -f -c 000000 && doas /usr/local/sbin/osxflow-suspend` |
-| Restart | `doas /sbin/reboot` |
-| Shut Down | `doas /sbin/poweroff` |
-| Lock Screen | `swaylock -f -c 000000` |
-| Log Out | `labwc --exit` |
+| Row | labwc (Wayland) | XFCE (X11) |
+| --- | --- | --- |
+| System Settings… | -- | `xfce4-settings-manager` |
+| Task Manager… | `foot -T "Task Manager" top` | `xfce4-taskmanager` |
+| Sleep | `swaylock -f -c 000000 && doas /usr/local/sbin/osxflow-suspend` | `xfce4-session-logout --suspend` |
+| Restart | `doas /sbin/reboot` | `xfce4-session-logout --reboot` |
+| Shut Down | `doas /sbin/poweroff` | `xfce4-session-logout --halt` |
+| Lock Screen | `swaylock -f -c 000000` | `xflock4` |
+| Log Out | `labwc --exit` | `xfce4-session-logout --logout` |
 
-Sleep locks before suspending, the way the XFCE dialog did; `swaylock -f`
+On Alpine there is no elogind, so power goes through doas (below). Sleep
+locks before suspending, the way the XFCE dialog did; `swaylock -f`
 returns once the screen is actually covered, so the lock is up before the
-machine goes down. There is no System Settings row: nothing on Alpine
-answers to that.
+machine goes down. There is no System Settings row there: nothing on
+Alpine answers to that.
 
 ## Installing
 
