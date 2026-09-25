@@ -70,12 +70,32 @@ func (a *app) handleWayland(e wl.Event) {
 			a.hoverAt(s, image.Pt(-1, -1))
 		}
 	case wl.Button:
-		if !e.Pressed || a.host.IsOpen() {
+		if !e.Pressed {
 			return
 		}
-		if s := a.screenFor(e.Bar); s != nil {
-			a.press(s, image.Pt(e.X, e.Y), button(e.Button))
+		s := a.screenFor(e.Bar)
+		if s == nil {
+			return
 		}
+		// A menu of this bar's own -- a tray item's, drawn here because
+		// the item publishes it over D-Bus -- is put away by this click
+		// rather than acted on.
+		//
+		// On X11 the click would never have arrived: the open menu holds
+		// a pointer grab, and a press anywhere outside it goes to the
+		// menu, which closes itself. Under Wayland that grab does not
+		// cover the compositor's own surfaces (see
+		// internal/menu/exclusive.go), so the bar is one of the places a
+		// click can land while a menu is open, and the bar is then the
+		// only thing that can dismiss it. Ignoring the click, which is
+		// what this did, left the menu with no way to be closed but
+		// choosing something from it.
+		if a.host.IsOpen() {
+			a.host.Close()
+			a.hoverAt(s, image.Pt(e.X, e.Y))
+			return
+		}
+		a.press(s, image.Pt(e.X, e.Y), button(e.Button))
 	case wl.Configure:
 		if s := a.screenFor(e.Bar); s != nil {
 			// Width in device pixels: the configure is logical, and
