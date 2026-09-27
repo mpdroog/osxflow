@@ -400,6 +400,18 @@ func (c *Conn) Toplevels() ([]Toplevel, error) {
 	return out, nil
 }
 
+// Err is what ended the connection, or nil while it is live.
+//
+// The state readers above answer from the last thing the compositor said
+// and keep doing so after it has gone, which is right for a repaint and
+// wrong for a poller: a caller that only reads state, and never sends,
+// has no other way to find out that there is nothing on the other end.
+func (c *Conn) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
 // Active is the toplevel that has the keyboard, and whether anything
 // does. A compositor with nothing focused -- the pointer on the desktop --
 // is the false case, and is normal rather than an error.
