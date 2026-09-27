@@ -26,3 +26,11 @@ Restart=always
 RestartSec=1s
 RestartSteps=6
 RestartMaxDelaySec=30s
+# Each tool peaks at about 20-35MB. A leak is squeezed past MemoryHigh and
+# killed at MemoryMax, and the kill is a stop like any other: Restart=
+# brings it back with a clean heap, which beats the kernel's OOM killer
+# picking something of the user's once the whole machine runs short.
+# Apps launched from the dock are not counted here; launch.InOwnScope
+# puts each in a scope of its own.
+MemoryHigh=256M
+MemoryMax=512M
