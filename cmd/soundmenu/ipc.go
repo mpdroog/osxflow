@@ -21,8 +21,10 @@ package main
 // the overlay appears, the same on either display server.
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -87,6 +89,9 @@ func (a *app) exportIPC() error {
 }
 
 // sendKey is client mode: hand one key to the running instance and exit.
+// keyTimeout bounds how long a key press waits for the running soundmenu.
+const keyTimeout = 2 * time.Second
+
 func sendKey(action string) error {
 	if _, ok := keyNames[action]; !ok {
 		return fmt.Errorf("unknown key %q, want one of %v", action, ipcKeyNames)
@@ -101,8 +106,12 @@ func sendKey(action string) error {
 		}
 	}()
 
+	// A soundmenu that is stuck would otherwise hold every key press for
+	// the bus's 25 seconds, and a held key starts one of these per repeat.
+	ctx, cancel := context.WithTimeout(context.Background(), keyTimeout)
+	defer cancel()
 	obj := conn.Object(ipcBusName, dbus.ObjectPath(ipcPath))
-	if err := obj.Call(ipcIface+".Key", 0, action).Store(); err != nil {
+	if err := obj.CallWithContext(ctx, ipcIface+".Key", 0, action).Store(); err != nil {
 		return fmt.Errorf("sending %q to the running soundmenu: %w", action, err)
 	}
 	return nil

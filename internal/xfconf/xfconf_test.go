@@ -1,6 +1,7 @@
 package xfconf
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -340,4 +341,65 @@ func FuzzParseSignal(f *testing.F) {
 			t.Fatalf("ignored signal still produced %+v", got)
 		}
 	})
+}
+
+// stuckXfconfd takes every call and answers none, the way a hung xfconfd
+// does: the name has an owner, so the bus never says there is nobody there.
+type stuckXfconfd struct{ release chan struct{} }
+
+func (f *stuckXfconfd) GetProperty(_, _ string) (dbus.Variant, *dbus.Error) {
+	<-f.release
+	return dbus.MakeVariant(true), nil
+}
+
+func (f *stuckXfconfd) GetAllProperties(_, _ string) (map[string]dbus.Variant, *dbus.Error) {
+	<-f.release
+	return nil, nil
+}
+
+func (f *stuckXfconfd) SetProperty(_, _ string, _ dbus.Variant) *dbus.Error {
+	<-f.release
+	return nil
+}
+
+// A hung xfconfd must not hold the caller -- a menu's main loop -- for
+// longer than the client's timeout.
+func TestCallsGiveUpOnAStuckXfconfd(t *testing.T) {
+	addr := dbustest.Start(t)
+	server := dbustest.Conn(t, addr)
+	fake := &stuckXfconfd{release: make(chan struct{})}
+	t.Cleanup(func() { close(fake.release) })
+	if err := server.Export(fake, ObjectPath, Interface); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.RequestName(BusName, dbus.NameFlagDoNotQueue); err != nil {
+		t.Fatal(err)
+	}
+	client := New(dbustest.Conn(t, addr))
+	client.timeout = 50 * time.Millisecond
+
+	calls := map[string]func() error{
+		"Get": func() error {
+			_, err := client.Get("xfce4-notifyd", "/do-not-disturb")
+			return err
+		},
+		"GetAll": func() error {
+			_, err := client.GetAll("xfce4-notifyd", "/")
+			return err
+		},
+		"Set": func() error { return client.Set("xfce4-notifyd", "/do-not-disturb", true) },
+	}
+	for name, call := range calls {
+		start := time.Now()
+		err := call()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("%s: %v, want context.DeadlineExceeded", name, err)
+		}
+		if took := time.Since(start); took > 5*time.Second {
+			t.Errorf("%s took %v", name, took)
+		}
+		if errors.Is(err, ErrNoXfconf) {
+			t.Errorf("%s: a stuck xfconfd is not a missing one: %v", name, err)
+		}
+	}
 }
