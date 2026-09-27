@@ -25,6 +25,8 @@ package menu
 // is still retrying, and the retry absorbs the race.
 
 import (
+	"log"
+
 	"github.com/godbus/dbus/v5"
 )
 
@@ -96,8 +98,11 @@ func (h *Host) announce() {
 		return
 	}
 	// A failed emit costs mutual exclusion, not the menu, and the session
-	// bus going away is reported by everything else here already.
-	_ = AnnounceOpened(h.bus)
+	// bus going away is reported by everything else here too, so this
+	// is logged and not returned.
+	if err := AnnounceOpened(h.bus); err != nil {
+		log.Printf("asking other menus to close: %v", err)
+	}
 }
 
 // AnnounceOpened asks every osxflow menu in the session to close.

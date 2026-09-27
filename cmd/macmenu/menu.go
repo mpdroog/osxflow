@@ -24,11 +24,23 @@ func action(label string, click func()) menu.Row {
 // launcher's job. Nothing asks twice: restart, shut down and log out happen
 // on the click.
 //
-// Every row here is a Wayland-era command. The XFCE ones this menu was
-// written against -- xfce4-session-logout, xflock4, xfce4-settings-manager,
-// xfce4-taskmanager -- are not installed on Alpine, and a missing program
-// is not an error the menu can show: the row would close and nothing would
-// happen. So:
+// The same binary runs on two desktops -- Alpine with labwc, and Mint with
+// XFCE on the laptop -- and the commands behind the rows share nothing. A
+// missing program is not an error the menu can show: the row would close
+// and nothing would happen. So wayland picks the set, the same way
+// WAYLAND_DISPLAY picks the display code everywhere else.
+func mainRows(userName string, wayland bool, act actions) []menu.Row {
+	logOut := "Log Out"
+	if userName != "" {
+		logOut = "Log Out " + userName
+	}
+	if wayland {
+		return labwcRows(logOut, act)
+	}
+	return xfceRows(logOut, act)
+}
+
+// labwcRows is the menu on Alpine, where none of the XFCE programs exist:
 //
 //   - Sleep, Restart and Shut Down go through doas, because this machine
 //     has no elogind and so no loginctl to ask. See files/doas/30-osxflow-power.conf
@@ -39,11 +51,7 @@ func action(label string, click func()) menu.Row {
 //     machine goes down.
 //   - Log Out is labwc's own --exit, which ends the session cleanly.
 //   - There is no System Settings row: nothing on Alpine answers to that.
-func mainRows(userName string, act actions) []menu.Row {
-	logOut := "Log Out"
-	if userName != "" {
-		logOut = "Log Out " + userName
-	}
+func labwcRows(logOut string, act actions) []menu.Row {
 	return []menu.Row{
 		action("About This Linux", act.about),
 		separator(),
@@ -55,6 +63,25 @@ func mainRows(userName string, act actions) []menu.Row {
 		separator(),
 		action("Lock Screen", func() { act.run("sh", "-c", lockCmd) }),
 		action(logOut, func() { act.run("labwc", "--exit") }),
+	}
+}
+
+// xfceRows is the menu under XFCE, where xfce4-session-logout ends the
+// session the way the session's own dialog would, and locks before a
+// suspend by itself.
+func xfceRows(logOut string, act actions) []menu.Row {
+	return []menu.Row{
+		action("About This Linux", act.about),
+		separator(),
+		action("System Settings…", func() { act.run("xfce4-settings-manager") }),
+		action("Task Manager…", func() { act.run("xfce4-taskmanager") }),
+		separator(),
+		action("Sleep", func() { act.run("xfce4-session-logout", "--suspend") }),
+		action("Restart", func() { act.run("xfce4-session-logout", "--reboot") }),
+		action("Shut Down", func() { act.run("xfce4-session-logout", "--halt") }),
+		separator(),
+		action("Lock Screen", func() { act.run("xflock4") }),
+		action(logOut, func() { act.run("xfce4-session-logout", "--logout") }),
 	}
 }
 

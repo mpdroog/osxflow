@@ -79,6 +79,29 @@ func (c *Client) Get(channel, property string) (any, error) {
 	return v.Value(), nil
 }
 
+// GetAll reads every property of a channel under base ("/" for all of
+// them), keyed by full property path. An array property's value is a
+// []dbus.Variant, as with Get.
+func (c *Client) GetAll(channel, base string) (map[string]any, error) {
+	var props map[string]dbus.Variant
+	err := c.conn.Object(BusName, ObjectPath).Call(Interface+".GetAllProperties", 0, channel, base).Store(&props)
+	if err != nil {
+		var dbusErr dbus.Error
+		if errors.As(err, &dbusErr) {
+			switch dbusErr.Name {
+			case "org.freedesktop.DBus.Error.ServiceUnknown", "org.freedesktop.DBus.Error.NameHasNoOwner":
+				return nil, fmt.Errorf("reading %s %s: %w: %w", channel, base, ErrNoXfconf, err)
+			}
+		}
+		return nil, fmt.Errorf("reading %s %s: %w", channel, base, err)
+	}
+	out := make(map[string]any, len(props))
+	for k, v := range props {
+		out[k] = v.Value()
+	}
+	return out, nil
+}
+
 // Set writes one property, creating it if it has never been set.
 //
 // The value's Go type becomes the property's xfconf type, so pass the type

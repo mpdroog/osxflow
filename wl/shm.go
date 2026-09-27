@@ -17,6 +17,7 @@ package wl
 
 import (
 	"fmt"
+	"math"
 
 	"golang.org/x/sys/unix"
 
@@ -66,6 +67,9 @@ func (c *Conn) newPool(width, height int) (*pool, []*buffer, error) {
 	stride := width * 4
 	frame := stride * height
 	size := frame * buffers
+	if size > math.MaxInt32 {
+		return nil, nil, fmt.Errorf("a %dx%d buffer is too large to share with the compositor", width, height)
+	}
 
 	fd, err := unix.MemfdCreate("osxflow-wl", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
 	if err != nil {
@@ -73,17 +77,18 @@ func (c *Conn) newPool(width, height int) (*pool, []*buffer, error) {
 	}
 	closeFD := func(cause error) (*pool, []*buffer, error) {
 		if closeErr := unix.Close(fd); closeErr != nil {
-			return nil, nil, fmt.Errorf("%w (and closing the file: %v)", cause, closeErr)
+			return nil, nil, fmt.Errorf("%w (and closing the file: %w)", cause, closeErr)
 		}
 		return nil, nil, cause
 	}
-	if err := unix.Ftruncate(fd, int64(size)); err != nil {
+	if err = unix.Ftruncate(fd, int64(size)); err != nil {
 		return closeFD(fmt.Errorf("sizing the shared-memory file to %d bytes: %w", size, err))
 	}
 	// Sealed after the size is final and before the compositor ever sees
 	// it. F_SEAL_SHRINK is the one that matters; the others cost nothing
 	// and say plainly that this file is finished being changed.
-	if _, err := unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, unix.F_SEAL_SHRINK|unix.F_SEAL_GROW); err != nil {
+	//nolint:gosec // a descriptor MemfdCreate returned without error is never negative
+	if _, err = unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, unix.F_SEAL_SHRINK|unix.F_SEAL_GROW); err != nil {
 		return closeFD(fmt.Errorf("sealing the shared-memory file: %w", err))
 	}
 	data, err := unix.Mmap(fd, 0, size, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
@@ -92,8 +97,11 @@ func (c *Conn) newPool(width, height int) (*pool, []*buffer, error) {
 	}
 
 	p := &pool{id: c.alloc(), fd: fd, data: data, size: size}
-	if err := c.sendFD(c.shm, shmCreatePool, fd, argUint(p.id), argUint(uint32(size))); err != nil {
-		_ = unix.Munmap(data)
+	//nolint:gosec // size is checked against math.MaxInt32 above
+	if err = c.sendFD(c.shm, shmCreatePool, fd, argUint(p.id), argUint(uint32(size))); err != nil {
+		if unmapErr := unix.Munmap(data); unmapErr != nil {
+			err = fmt.Errorf("%w (and unmapping the file: %w)", err, unmapErr)
+		}
 		return closeFD(err)
 	}
 

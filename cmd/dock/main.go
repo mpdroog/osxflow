@@ -293,7 +293,7 @@ func (d *dockApp) createWindows() error {
 	// that monitor's own bottom edge: reaching the bottom of whichever
 	// screen you are working on brings the dock there, as macOS does.
 	for _, m := range d.mons {
-		if err = d.createTriggerWindow(m.W, triggerH, m.X, m.Bottom()-triggerH); err != nil {
+		if err := d.createTriggerWindow(m.W, triggerH, m.X, m.Bottom()-triggerH); err != nil {
 			return err
 		}
 	}

@@ -281,8 +281,11 @@ func (a *app) updateApp() {
 // when the focus is on the desktop, a panel or nothing.
 func (a *app) focusedApp() (string, error) {
 	id, err := a.activeWindow()
-	if err != nil || id == 0 {
+	if err != nil {
 		return "", err
+	}
+	if id == 0 {
+		return "", nil
 	}
 	wins, err := a.windows.Windows()
 	if err != nil {

@@ -109,8 +109,8 @@ func run(list, windows, match, where bool, open, eval, query string, scale float
 	// Logged rather than joined into the result: whatever the launcher did
 	// is done by now, and a failure to hang up does not undo it.
 	defer func() {
-		if err := server.Close(); err != nil {
-			log.Printf("closing the X connection: %v", err)
+		if closeErr := server.Close(); closeErr != nil {
+			log.Printf("closing the X connection: %v", closeErr)
 		}
 	}()
 
@@ -162,9 +162,9 @@ func run(list, windows, match, where bool, open, eval, query string, scale float
 	l := launch.New(server)
 	launched := false
 	err = ui.Run(apps, func(app *desktop.App, chosenFor string) error {
-		res, err := l.Open(app)
-		if err != nil {
-			return err // ui shows it and logs it; see ui.OpenFunc
+		res, openErr := l.Open(app)
+		if openErr != nil {
+			return openErr // ui shows it and logs it; see ui.OpenFunc
 		}
 		launched = true
 		if res.Focused {
@@ -178,8 +178,8 @@ func run(list, windows, match, where bool, open, eval, query string, scale float
 		// rather than returned.
 		if !noLearn {
 			store.Record(chosenFor, app.ID, time.Now())
-			if err := store.Save(time.Now()); err != nil {
-				log.Printf("could not save usage: %v", err)
+			if saveErr := store.Save(time.Now()); saveErr != nil {
+				log.Printf("could not save usage: %v", saveErr)
 			}
 		}
 		return nil
@@ -188,7 +188,7 @@ func run(list, windows, match, where bool, open, eval, query string, scale float
 	// Hand the keyboard back, unless something was launched -- in which
 	// case it has the keyboard, and that is the point.
 	if !launched && hadPrevious {
-		restoreFocus(server, previous)
+		restoreFocus(server, &previous)
 	}
 	return err
 }
@@ -228,7 +228,7 @@ func focusedWindow(server xwin.Server) (xwin.Window, bool) {
 //
 // A failure is logged and no more: the launcher has done what it was
 // opened for, and the user can click the window.
-func restoreFocus(server xwin.Server, win xwin.Window) {
+func restoreFocus(server xwin.Server, win *xwin.Window) {
 	if err := server.Activate(win.ID); err != nil {
 		log.Printf("handing the keyboard back to %s: %v", win.String(), err)
 	}

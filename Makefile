@@ -65,6 +65,7 @@ fuzz:
 	go test ./internal/sni    -run=XXX -fuzz=FuzzParseService     -fuzztime=10s
 	go test ./internal/sni    -run=XXX -fuzz=FuzzToImage          -fuzztime=20s
 	go test ./internal/dbusmenu -run=XXX -fuzz=FuzzLabel          -fuzztime=10s
+	go test ./cmd/osxflow-doctor -run=XXX -fuzz=FuzzParseGroup   -fuzztime=10s
 
 lint: errguard
 	gofmt -l .
@@ -80,7 +81,7 @@ lint: errguard
 ERRDROP := //nolint:[a-z,]*errcheck|_ = err$$|\berr == nil &&|\berr != nil [|][|]
 
 errguard:
-	@if grep -rnE --include='*.go' --exclude='*_test.go' '$(ERRDROP)' cmd internal tools; then \
+	@if grep -rnE --include='*.go' --exclude='*_test.go' '$(ERRDROP)' cmd internal tools wl; then \
 		echo "errguard: errors above are checked and then dropped; return or log them"; \
 		exit 1; \
 	fi

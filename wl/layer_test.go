@@ -5,12 +5,18 @@ import (
 	"testing"
 )
 
+// The object ids newTestBar gives its bar's layer surface and wl_surface.
+const (
+	testLayer   = 10
+	testSurface = 11
+)
+
 // newTestBar is a bar registered the way NewBar registers one, without a
 // compositor to configure it.
-func newTestBar(c *Conn, layer, surface uint32) *Bar {
-	b := &Bar{c: c, surface: surface, layer: layer, scale120: scaleUnit}
-	c.bars[layer] = b
-	c.surfaces[surface] = b
+func newTestBar(c *Conn) *Bar {
+	b := &Bar{c: c, surface: testSurface, layer: testLayer, scale120: scaleUnit}
+	c.bars[testLayer] = b
+	c.surfaces[testSurface] = b
 	return b
 }
 
@@ -26,7 +32,6 @@ func words(vs ...uint32) []byte {
 // fixedArg encodes logical pixels as wl_fixed_t, the 24.8 the pointer
 // reports positions in.
 func fixedArg(v float64) uint32 {
-	//nolint:gosec // building the protocol's signed fixed point for a test
 	return uint32(int32(v * 256))
 }
 
@@ -63,7 +68,7 @@ func TestFixedDecodesTheProtocolsFixedPoint(t *testing.T) {
 
 func TestDeviceSizeRoundsToWholePixels(t *testing.T) {
 	c := newTestConn(t)
-	b := newTestBar(c, 10, 11)
+	b := newTestBar(c)
 	b.w, b.h = 2560, 29
 	for _, tc := range []struct {
 		name         string
@@ -88,9 +93,9 @@ func TestDeviceSizeRoundsToWholePixels(t *testing.T) {
 
 func TestConfigureRecordsTheSizeAndAnnouncesIt(t *testing.T) {
 	c := newTestConn(t)
-	b := newTestBar(c, 10, 11)
+	b := newTestBar(c)
 
-	c.layerSurface(10, shellSurfaceConfigure, words(7, 3440, 29))
+	c.layerSurface(testLayer, shellSurfaceConfigure, words(7, 3440, 29))
 
 	if !b.configured {
 		t.Error("the bar was not marked configured")
@@ -112,11 +117,11 @@ func TestConfigureRecordsTheSizeAndAnnouncesIt(t *testing.T) {
 // compositor repeats itself.
 func TestRepeatedConfigureIsNotAnnouncedTwice(t *testing.T) {
 	c := newTestConn(t)
-	newTestBar(c, 10, 11)
+	newTestBar(c)
 
-	c.layerSurface(10, shellSurfaceConfigure, words(7, 3440, 29))
+	c.layerSurface(testLayer, shellSurfaceConfigure, words(7, 3440, 29))
 	<-c.events
-	c.layerSurface(10, shellSurfaceConfigure, words(8, 3440, 29))
+	c.layerSurface(testLayer, shellSurfaceConfigure, words(8, 3440, 29))
 
 	select {
 	case e := <-c.events:
@@ -127,9 +132,9 @@ func TestRepeatedConfigureIsNotAnnouncedTwice(t *testing.T) {
 
 func TestClosedMarksTheBarFinished(t *testing.T) {
 	c := newTestConn(t)
-	b := newTestBar(c, 10, 11)
+	b := newTestBar(c)
 
-	c.layerSurface(10, shellSurfaceClosed, nil)
+	c.layerSurface(testLayer, shellSurfaceClosed, nil)
 
 	if !b.closed {
 		t.Error("the bar was not marked closed")
@@ -147,7 +152,7 @@ func TestClosedMarksTheBarFinished(t *testing.T) {
 
 func TestPreferredScaleIsFollowed(t *testing.T) {
 	c := newTestConn(t)
-	b := newTestBar(c, 10, 11)
+	b := newTestBar(c)
 	c.fracs[12] = b
 
 	c.fractionalScale(12, fracPreferredScale, words(180))
@@ -187,11 +192,11 @@ func TestBufferReleaseMakesItDrawableAgain(t *testing.T) {
 
 func TestPointerReportsDevicePixels(t *testing.T) {
 	c := newTestConn(t)
-	b := newTestBar(c, 10, 11)
+	b := newTestBar(c)
 	b.scale120 = 180 // a monitor at 1.5
 
 	// enter carries a serial and the surface before the coordinates.
-	c.pointerEvent(pointerEnter, words(1, 11, fixedArg(100), fixedArg(10)))
+	c.pointerEvent(pointerEnter, words(1, testSurface, fixedArg(100), fixedArg(10)))
 	e, ok := next(t, c).(Motion)
 	if !ok {
 		t.Fatalf("emitted %T, want Motion", e)
@@ -220,7 +225,7 @@ func TestPointerReportsDevicePixels(t *testing.T) {
 		t.Errorf("Button = %+v, want a left press at 300,6", btn)
 	}
 
-	c.pointerEvent(pointerLeave, words(3, 11))
+	c.pointerEvent(pointerLeave, words(3, testSurface))
 	if _, ok := next(t, c).(Leave); !ok {
 		t.Error("no Leave event")
 	}
