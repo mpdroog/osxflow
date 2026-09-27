@@ -182,17 +182,27 @@ func ItemSignals() []dbus.MatchOption {
 // carries enough to act on by itself, so each means reading the
 // properties again.
 func Changed(sig *dbus.Signal) bool {
+	_, ok := ChangedMember(sig)
+	return ok
+}
+
+// ChangedMember is the same question with the answer kept: which of the
+// signals it was, so that a host which does not show everything an item
+// can send is free to ignore the ones it would not draw. Reading the
+// properties back is a round trip that carries the icon with it, and an
+// item may signal as often as it likes.
+func ChangedMember(sig *dbus.Signal) (string, bool) {
 	if sig == nil {
-		return false
+		return "", false
 	}
 	member, ok := strings.CutPrefix(sig.Name, Interface+".")
 	if !ok {
-		return false
+		return "", false
 	}
 	switch member {
 	case "NewIcon", "NewAttentionIcon", "NewOverlayIcon", "NewIconThemePath",
 		"NewTitle", "NewStatus", "NewToolTip", "NewMenu":
-		return true
+		return member, true
 	}
-	return false
+	return "", false
 }

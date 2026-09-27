@@ -376,8 +376,8 @@ func (a *app) loop() error {
 		case err := <-a.watcher.Errors():
 			log.Print(err)
 		case sig := <-signals:
-			if sni.Changed(sig) {
-				a.itemChanged(sig.Sender, string(sig.Path))
+			if member, ok := sni.ChangedMember(sig); ok {
+				a.itemChanged(sig.Sender, string(sig.Path), member)
 			}
 		case res := <-a.fetches:
 			a.applyFetch(&res)

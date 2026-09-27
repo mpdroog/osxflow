@@ -8,6 +8,7 @@ package main
 // process, and one that hangs must not freeze the bar.
 
 import (
+	"bytes"
 	"context"
 	"image"
 	"log"
@@ -132,21 +133,96 @@ func (a *app) applyFetch(res *fetched) {
 	if res.owner != "" {
 		it.owner = res.owner
 	}
+	// None of the eight item signals says what changed, so every one of
+	// them costs a full re-read of the properties -- and an item is free
+	// to emit them as often as it likes. ezhours does, once a second, for
+	// a title this bar does not draw and a two-frame blinking icon. Taken
+	// at face value that repainted both bars every second forever: ~3% of
+	// a core in here and as much again in the compositor, on an idle
+	// desktop. So compare what came back against what is on screen and do
+	// the work only when the pixels would differ.
+	was, first := it.state, !it.ready
 	it.state = res.state
 	it.ready = true
+	if !first && sameIcon(&was, &it.state) {
+		// The drawn state is unchanged. The rest of it -- menu path,
+		// tooltip -- is still stored above, because a click reads it.
+		if sameLayout(&was, &it.state) {
+			return
+		}
+		// Shown or hidden, or reordered: the slots move, but every
+		// item's own pixels are still good at every scale.
+		a.relayoutAll()
+		return
+	}
 	// New pixels: whatever was drawn from the old ones, at whatever
 	// scales, is stale.
 	it.icons = nil
 	a.relayoutAll()
 }
 
-// itemChanged refetches the item a signal came from.
-func (a *app) itemChanged(sender, path string) {
+// sameIcon reports whether two states would draw the same icon.
+//
+// Title and ID are part of the answer only when there are no pixels: they
+// are what drawItemIcon falls back to, one letter of it.
+func sameIcon(a, b *sni.State) bool {
+	if a.IconName != b.IconName || a.IconThemePath != b.IconThemePath {
+		return false
+	}
+	if !samePixmaps(a.Icon, b.Icon) {
+		return false
+	}
+	if len(b.Icon) == 0 {
+		return a.Title == b.Title && a.ID == b.ID
+	}
+	return true
+}
+
+// sameLayout reports whether two states would leave the bar's slots where
+// they are: whether the item is shown at all, and where order() puts it.
+func sameLayout(a, b *sni.State) bool {
+	return a.Hidden() == b.Hidden() && a.ID == b.ID
+}
+
+func samePixmaps(a, b []sni.Pixmap) bool {
+	return slices.EqualFunc(a, b, func(x, y sni.Pixmap) bool {
+		return x.Width == y.Width && x.Height == y.Height && bytes.Equal(x.Pix, y.Pix)
+	})
+}
+
+// itemChanged refetches the item a signal came from, unless the signal
+// was about something this bar does not show.
+func (a *app) itemChanged(sender, path, member string) {
 	for _, it := range a.items {
 		if it.owner == sender && string(it.remote.Ref.Path) == path {
+			if ignorable(it, member) {
+				continue
+			}
 			a.fetch(it)
 		}
 	}
+}
+
+// ignorable reports whether a signal cannot change anything on the bar,
+// and so need not be read back at all.
+//
+// The saving is the round trip, not the comparison afterwards: no signal
+// says what it changed, so the only way to answer one is GetAll -- which
+// returns the item's icon, pixel by pixel, however small the thing that
+// actually moved. ezhours signals a new title every second for a clock
+// that is never drawn here; answering those cost more than everything
+// else the bar does.
+func ignorable(it *trayItem, member string) bool {
+	switch member {
+	case "NewToolTip":
+		// Nothing on this bar shows a tooltip.
+		return true
+	case "NewTitle":
+		// The title is drawn only as the initial of an item that sent
+		// no pixels of its own -- and then only until it sends some.
+		return it.ready && len(it.state.Icon) > 0
+	}
+	return false
 }
 
 // itemIcon draws an item's icon at one bar's icon size: its own pixels
