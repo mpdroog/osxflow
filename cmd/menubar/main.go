@@ -85,7 +85,9 @@ type app struct {
 	refs    []sni.Ref // registration order
 	shown   []*trayItem
 
+	// windows is nil until windowsC delivers it; see xwin.Await.
 	windows    xwin.Server
+	windowsC   <-chan xwin.Server
 	index      *launch.Index
 	activeAtom xproto.Atom
 	appName    string
@@ -162,9 +164,16 @@ func start() error {
 	// Wayland-native windows exist and so labwc publishes no
 	// _NET_CLIENT_LIST at all. That is what left the focused
 	// application's name blank on this desk.
-	if a.windows, err = xwin.NewServerWith(xu); err != nil {
-		return err
-	}
+	//
+	// In the background, and not a reason to stop: only the focused
+	// application's name needs it, and waiting on a window manager that
+	// is not up yet would keep the tray -- which every menu registers
+	// with -- off the bus meanwhile. Failing on it is what emptied the
+	// desktop on 2026-09-27.
+	quit := make(chan struct{})
+	defer close(quit)
+	a.windowsC = xwin.Await(func() (xwin.Server, error) { return xwin.NewServerWith(xu) },
+		windowsRetry, log.Printf, quit)
 	apps, problems := desktop.Scan()
 	for _, p := range problems {
 		log.Printf("warning: %v", p)
@@ -200,6 +209,10 @@ func start() error {
 	}
 	return a.loop()
 }
+
+// windowsRetry is how long menubar waits between attempts to open the
+// window list, after one has failed.
+const windowsRetry = 5 * time.Second
 
 // loadFaces rasterises the regular and bold faces at one size, and
 // returns what closes them.
@@ -284,7 +297,7 @@ func (a *app) focusedApp() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if id == 0 {
+	if id == 0 || a.windows == nil {
 		return "", nil
 	}
 	wins, err := a.windows.Windows()
@@ -374,6 +387,9 @@ func (a *app) loop() error {
 			a.handleWayland(e)
 		case err := <-xGone:
 			return err
+		case s := <-a.windowsC:
+			a.windows, a.windowsC = s, nil
+			a.updateApp()
 		case <-a.watcher.Changes():
 			a.syncItems()
 		case err := <-a.watcher.Errors():
