@@ -21,6 +21,7 @@ package main
 // the overlay appears, the same on either display server.
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/godbus/dbus/v5"
@@ -31,6 +32,13 @@ const (
 	ipcPath    = "/com/mpdroog/osxflow/SoundMenu"
 	ipcIface   = "com.mpdroog.osxflow.SoundMenu"
 )
+
+// errNameTaken is a name the bus would not hand over: another soundmenu
+// holds it and has refused to be replaced.
+var errNameTaken = errors.New(ipcBusName + " is held by another soundmenu that will not give it up")
+
+// errNameLost is the running instance being replaced by a newer one.
+var errNameLost = errors.New("another soundmenu took " + ipcBusName + "; it has the volume keys now")
 
 // keyNames maps what the compositor is told to type to what it means.
 var keyNames = map[string]keyAction{
@@ -68,21 +76,80 @@ func (i ipc) Key(action string) *dbus.Error {
 }
 
 // exportIPC publishes the object and claims the name.
-//
-// Losing the name is not fatal: a second soundmenu is a mistake rather
-// than a disaster, and the one already running keeps the keys.
 func (a *app) exportIPC() error {
-	if err := a.session.Export(ipc{keys: a.keyC}, dbus.ObjectPath(ipcPath), ipcIface); err != nil {
-		return fmt.Errorf("exporting %s: %w", ipcIface, err)
+	lost, err := exportIPCOn(a.session, a.keyC)
+	a.nameLost = lost
+	return err
+}
+
+// exportIPCOn is exportIPC against any connection, so that it can be
+// tested on a bus of its own.
+//
+// The name is taken from whoever holds it (NameFlagReplaceExisting) and
+// left available to whoever asks next (NameFlagAllowReplacement). Asking
+// politely is what killed the volume keys once already: soundmenu is
+// restarted by hand whenever it is rebuilt, a polite claim against the
+// copy still running is refused, and the refusal was only logged. The new
+// instance then ran on with no name -- tray icon fine, menu fine, sound
+// fine -- while every `soundmenu -key raise` the compositor ran got
+// "The name com.mpdroog.osxflow.SoundMenu was not provided by any .service
+// files" from the bus. Taking the name means the newest instance, which is
+// the one the user just started, is always the one the keys reach.
+//
+// The returned channel is closed if some later soundmenu takes the name
+// back; see run, which stops rather than linger as a copy nothing can
+// reach.
+func exportIPCOn(conn *dbus.Conn, keys chan<- keyAction) (<-chan struct{}, error) {
+	if err := conn.Export(ipc{keys: keys}, dbus.ObjectPath(ipcPath), ipcIface); err != nil {
+		return nil, fmt.Errorf("exporting %s: %w", ipcIface, err)
 	}
-	reply, err := a.session.RequestName(ipcBusName, dbus.NameFlagDoNotQueue)
+
+	// Watched before the name is claimed, so a replacement arriving in
+	// the gap between the two is still seen.
+	if err := conn.AddMatchSignal(
+		dbus.WithMatchSender("org.freedesktop.DBus"),
+		dbus.WithMatchObjectPath("/org/freedesktop/DBus"),
+		dbus.WithMatchInterface("org.freedesktop.DBus"),
+		dbus.WithMatchMember("NameLost"),
+		dbus.WithMatchArg(0, ipcBusName),
+	); err != nil {
+		return nil, fmt.Errorf("watching for the loss of %s: %w", ipcBusName, err)
+	}
+	signals := make(chan *dbus.Signal, 8)
+	conn.Signal(signals)
+	// Buffered and sent on rather than closed, so that the connection
+	// going away at shutdown -- which also ends the range below -- is not
+	// mistaken for a replacement.
+	lost := make(chan struct{}, 1)
+	go func() {
+		for sig := range signals {
+			if nameLost(sig) {
+				lost <- struct{}{}
+				return
+			}
+		}
+	}()
+
+	reply, err := conn.RequestName(ipcBusName,
+		dbus.NameFlagDoNotQueue|dbus.NameFlagReplaceExisting|dbus.NameFlagAllowReplacement)
 	if err != nil {
-		return fmt.Errorf("claiming %s: %w", ipcBusName, err)
+		return nil, fmt.Errorf("claiming %s: %w", ipcBusName, err)
 	}
 	if reply != dbus.RequestNameReplyPrimaryOwner {
-		return fmt.Errorf("%s is already owned; another soundmenu is running", ipcBusName)
+		return nil, fmt.Errorf("%w (RequestName reply %d)", errNameTaken, reply)
 	}
-	return nil
+	return lost, nil
+}
+
+// nameLost reports whether sig says this connection just lost the IPC
+// name. The channel carries everything the connection receives, so most
+// of what arrives is something else.
+func nameLost(sig *dbus.Signal) bool {
+	if sig == nil || sig.Name != "org.freedesktop.DBus.NameLost" || len(sig.Body) < 1 {
+		return false
+	}
+	name, ok := sig.Body[0].(string)
+	return ok && name == ipcBusName
 }
 
 // sendKey is client mode: hand one key to the running instance and exit.

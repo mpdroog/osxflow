@@ -32,7 +32,7 @@ import (
 
 	"github.com/jezek/xgb/xproto"
 
-	"github.com/mpdroog/osxflow/internal/wl"
+	"github.com/mpdroog/osxflow/wl"
 )
 
 // namespace is what the compositor calls the bar in its own logs and

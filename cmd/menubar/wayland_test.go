@@ -5,7 +5,7 @@ import (
 
 	"github.com/jezek/xgb/xproto"
 
-	"github.com/mpdroog/osxflow/internal/wl"
+	"github.com/mpdroog/osxflow/wl"
 )
 
 func TestButtonMapsKernelCodesToXButtons(t *testing.T) {

@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/mpdroog/osxflow/internal/paint"
-	"github.com/mpdroog/osxflow/internal/wl"
+	"github.com/mpdroog/osxflow/wl"
 )
 
 func main() {

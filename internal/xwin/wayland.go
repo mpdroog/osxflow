@@ -6,7 +6,7 @@ import (
 
 	"github.com/jezek/xgbutil"
 
-	"github.com/mpdroog/osxflow/internal/wl"
+	"github.com/mpdroog/osxflow/wl"
 )
 
 // wayland is a Server backed by wlr-foreign-toplevel-management.

@@ -35,8 +35,8 @@ import (
 	"github.com/mpdroog/osxflow/internal/menu"
 	"github.com/mpdroog/osxflow/internal/sni"
 	"github.com/mpdroog/osxflow/internal/text"
-	"github.com/mpdroog/osxflow/internal/wl"
 	"github.com/mpdroog/osxflow/internal/xwin"
+	"github.com/mpdroog/osxflow/wl"
 )
 
 // tuxPNG is cmd/macmenu/macmenu.svg rasterised by librsvg, which is what

@@ -126,6 +126,16 @@ func (o *osd) show(h *menu.Host, v osdView) {
 			log.Printf("volume overlay: %v", err)
 			return
 		}
+		// Before the first map, and the reason is the keyboard rather than
+		// the window manager: an override-redirect XWayland surface that
+		// declares no type is one labwc gives the seat's keyboard focus to,
+		// which blurs whatever the user is typing in every time the volume
+		// moves. See menu.Window.SetWindowType. Not fatal -- an overlay that
+		// misbehaves is better than no overlay -- but it is the whole
+		// difference between the keys being usable and not.
+		if typeErr := win.SetWindowType("_NET_WM_WINDOW_TYPE_NOTIFICATION"); typeErr != nil {
+			log.Printf("volume overlay: %v; pressing a volume key will blur the focused window", typeErr)
+		}
 		o.win = win
 	}
 	renderOSD(o.win.Surf.Image(), h.Theme.Scale, v)

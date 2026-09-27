@@ -17,6 +17,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -101,6 +102,10 @@ type app struct {
 	// grab. Buffered so a held-down key cannot block the bus.
 	keyC chan keyAction
 
+	// nameLost fires when a newer soundmenu takes the IPC name, and stays
+	// nil when there is no name to lose.
+	nameLost <-chan struct{}
+
 	session *dbus.Conn
 
 	// closeMenus carries "another osxflow menu opened"; see menu.Exclusive.
@@ -154,10 +159,17 @@ func newApp(scaleOverride float64, verbose bool) (*app, error) {
 	if a.session, err = dbus.ConnectSessionBus(); err != nil {
 		return abandon(fmt.Errorf("connecting to the session bus: %w", err))
 	}
-	// The compositor route for the volume keys. Not fatal: on X11 the grab
-	// above is what carries them, and there this is only a second way in.
+	// The compositor route for the volume keys. On Wayland it is the only
+	// route -- the grab above cannot work there -- so failing to claim the
+	// name is failing to start. Logging it and carrying on is what hid the
+	// breakage last time: the icon, the menu and the sound all worked, and
+	// only the keys were dead. On X11 the grab carries them and this is
+	// genuinely a second way in, so there it stays a log line.
 	if ipcErr := a.exportIPC(); ipcErr != nil {
-		log.Printf("volume keys over D-Bus unavailable: %v", ipcErr)
+		if os.Getenv("WAYLAND_DISPLAY") != "" {
+			return abandon(fmt.Errorf("volume keys over D-Bus: %w", ipcErr))
+		}
+		log.Printf("volume keys over D-Bus unavailable: %v; the X grab still carries them", ipcErr)
 	}
 
 	// One menu at a time across all of them. Not fatal: without it they
@@ -246,6 +258,11 @@ func (a *app) run() error {
 		case k := <-a.keyC:
 			// Exactly what a grabbed key press does, including the overlay.
 			a.pressed(k)
+
+		case <-a.nameLost:
+			// A newer soundmenu has the keys. Two tray icons and one of
+			// them unreachable is worse than stopping.
+			return errNameLost
 
 		case err := <-a.item.Registrations():
 			switch {

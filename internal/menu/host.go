@@ -4,6 +4,7 @@ package menu
 // ARGB visual, fonts, the scale, the Escape key -- and the windows it makes.
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -432,6 +433,51 @@ func findARGB(screen *xproto.ScreenInfo) (visual, bool) {
 		}
 	}
 	return visual{}, false
+}
+
+// SetWindowType declares _NET_WM_WINDOW_TYPE on the window. It must be
+// called before the window is first mapped, because the compositor reads
+// the type at map time.
+//
+// On this desktop it matters for a reason that has nothing to do with
+// window management. labwc hands the seat's keyboard focus to any mapped
+// override-redirect XWayland surface that wlroots'
+// wlr_xwayland_or_surface_wants_focus() approves of, and that function
+// approves of everything that declares no type at all. A menu wants that
+// focus and takes it deliberately. An overlay that only shows the user
+// something does not: taking it sends wl_keyboard.leave to whatever they
+// were typing in, and a native Wayland client responds the way it responds
+// to any lost focus -- Firefox blurs the focused element, so the caret and
+// the selection go.
+//
+// What makes it hard to see is that nothing else moves. An override-
+// redirect window never becomes a view, so it stays out of
+// _NET_CLIENT_LIST, never becomes _NET_ACTIVE_WINDOW, and never shows up
+// as the compositor's activated toplevel; and XWayland's window manager
+// will not set the X input focus to it either. The X side, the EWMH side
+// and the foreign-toplevel side all report, correctly, that nothing
+// happened. Only the client that lost the keyboard can tell.
+//
+// The types wlr_xwayland_or_surface_wants_focus() refuses are COMBO, DND,
+// DROPDOWN_MENU, MENU, NOTIFICATION, POPUP_MENU, SPLASH, TOOLTIP and
+// UTILITY. Pass one of those to keep the keyboard where it was.
+func (w *Window) SetWindowType(typeName string) error {
+	conn := w.host.Conn
+	typeAtom, err := atom(conn, "_NET_WM_WINDOW_TYPE")
+	if err != nil {
+		return err
+	}
+	valAtom, err := atom(conn, typeName)
+	if err != nil {
+		return err
+	}
+	val := make([]byte, 4)
+	binary.LittleEndian.PutUint32(val, uint32(valAtom))
+	if err := xproto.ChangePropertyChecked(conn, xproto.PropModeReplace, w.ID,
+		typeAtom, xproto.AtomAtom, 32, 1, val).Check(); err != nil {
+		return fmt.Errorf("setting _NET_WM_WINDOW_TYPE to %s: %w", typeName, err)
+	}
+	return nil
 }
 
 func atom(conn *xgb.Conn, name string) (xproto.Atom, error) {

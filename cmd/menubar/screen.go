@@ -25,8 +25,8 @@ import (
 	"golang.org/x/image/font"
 
 	"github.com/mpdroog/osxflow/internal/menu"
-	"github.com/mpdroog/osxflow/internal/wl"
 	"github.com/mpdroog/osxflow/internal/xmon"
+	"github.com/mpdroog/osxflow/wl"
 )
 
 // artwork is everything rasterised for one scale.
