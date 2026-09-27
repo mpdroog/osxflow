@@ -72,23 +72,28 @@ Only one notification daemon can run at a time, so installing `notifyd`
 means building it and then taking over from xfce4-notifyd. Nothing is
 uninstalled, and every step can be undone (see *Uninstalling* below).
 
-`notifyd` has no autostart entry of its own and needs none. The session
-bus starts it the first time an application sends a notification, at
-login or later, and starts it again if it ever exits.
+`notifyd` has no autostart entry of its own. `osxflow.target` wants
+`osxflow@notifyd.service` directly, so it starts at login; the D-Bus
+service file below also points bus activation at that same supervised
+unit, so however it starts, systemd is what is running it and restarts it
+if it ever exits.
 
 **1. Build and install the binary** into `~/.local/bin`:
 
     make notifyd
     install -m755 bin/notifyd ~/.local/bin/notifyd
 
-(`make install` does the same for every tool in the repository.)
+(`make install` does the same for every tool in the repository, and also
+installs the session -- see [files/systemd](../../files/systemd) for why.)
 
 **2. Register it with the session bus.** A service file in the user
 directory outranks the system one, so from now on the bus starts `notifyd`
-instead of xfce4-notifyd:
+instead of xfce4-notifyd. `make install` (`install-session`) writes this
+for you, with `SystemdService=osxflow@notifyd.service` so activation
+starts the supervised unit rather than a bare process; to do it by hand:
 
     mkdir -p ~/.local/share/dbus-1/services
-    printf '[D-BUS Service]\nName=org.freedesktop.Notifications\nExec=%s/.local/bin/notifyd\n' "$HOME" \
+    printf '[D-BUS Service]\nName=org.freedesktop.Notifications\nExec=%s/.local/bin/notifyd\nSystemdService=osxflow@notifyd.service\n' "$HOME" \
       > ~/.local/share/dbus-1/services/org.freedesktop.Notifications.service
 
 **3. Stop XFCE starting xfce4-notifyd at login.** It has two ways in: an
@@ -108,6 +113,10 @@ directories when told to, or at the next login.
     systemctl --user stop xfce4-notifyd.service
     dbus-send --session --dest=org.freedesktop.DBus --type=method_call \
       /org/freedesktop/DBus org.freedesktop.DBus.ReloadConfig
+    systemctl --user restart osxflow@notifyd
+
+The last line starts it now, rather than waiting for the first
+notification.
 
 **5. Check it.** Send a notification, then ask the bus who answered:
 
@@ -119,18 +128,18 @@ same check after your next login to confirm the takeover held.
 
 ### Updating
 
-Rebuild, copy the binary over, and stop the running copy. The next
-notification starts the new one:
-
     make notifyd && install -m755 bin/notifyd ~/.local/bin/notifyd
-    pkill -x notifyd
+    systemctl --user restart osxflow@notifyd
 
 ### Uninstalling
 
+Remove `osxflow@notifyd.service` from `Wants=` in
+`files/systemd/osxflow.target`, run `make install-session`, then:
+
+    systemctl --user stop osxflow@notifyd
     rm ~/.local/share/dbus-1/services/org.freedesktop.Notifications.service
     rm ~/.config/autostart/xfce4-notifyd.desktop
     systemctl --user unmask xfce4-notifyd.service
-    pkill -x notifyd
 
 The next notification starts xfce4-notifyd again, as does the next login.
 
@@ -168,12 +177,12 @@ with a notification a client sent (a malformed image, a hint of the wrong
 type). Those that can repeat -- per frame, per event, per sender -- are
 limited to a few lines a minute each, and the lines held back are counted.
 `notifyd -v` adds a trace of every notification, action and closure, and
-do-not-disturb changes. When started by the bus, its stderr is the journal
-stream it inherits from the bus, so the journal files its lines under
-`dbus.service` and labels them `dbus-daemon`, not notifyd. Filter on the
-prefix every line carries:
+do-not-disturb changes. It always runs as `osxflow@notifyd.service` --
+`osxflow.target` wants it directly, and the D-Bus service file's
+`SystemdService=` routes bus activation through the same unit -- so its
+log is always:
 
-    journalctl --user -u dbus.service | grep 'notifyd:'
+    journalctl --user -u osxflow@notifyd
 
 `-replace` takes the bus name from a running daemon that allows it.
 

@@ -13,7 +13,7 @@ PREFIX  ?= $(HOME)/.local
 # what makes every binary a single file with no distro dependencies.
 export CGO_ENABLED = 0
 
-.PHONY: all $(TOOLS) test lint errguard fuzz icons install clean
+.PHONY: all $(TOOLS) test lint errguard fuzz icons install install-session restart clean
 
 all: $(TOOLS)
 
@@ -95,12 +95,33 @@ errguard:
 icons:
 	go run ./tools/mkicons
 
-install: all
+install: all install-session
 	@mkdir -p $(PREFIX)/bin
 	@for t in $(TOOLS); do \
 		install -m755 $(BINDIR)/$$t $(PREFIX)/bin/$$t; \
 		echo "installed $(PREFIX)/bin/$$t"; \
 	done
+
+# The session: systemd starts the tools and restarts any that stop, and one
+# autostart entry starts systemd's side at login. See files/systemd for why
+# each piece is there. The D-Bus file is written rather than copied because
+# Exec= wants an absolute path; SystemdService= makes a notification that
+# arrives before login finishes start the supervised notifyd, not a bare one.
+UNITDIR := $(HOME)/.config/systemd/user
+DBUSDIR := $(HOME)/.local/share/dbus-1/services
+
+install-session:
+	@install -Dm644 -t $(UNITDIR) files/systemd/*
+	@install -Dm644 -t $(HOME)/.config/autostart files/autostart/osxflow.desktop
+	@mkdir -p $(DBUSDIR)
+	@printf '[D-BUS Service]\nName=org.freedesktop.Notifications\nExec=%s\nSystemdService=osxflow@notifyd.service\n' \
+		$(PREFIX)/bin/notifyd > $(DBUSDIR)/org.freedesktop.Notifications.service
+	systemctl --user daemon-reload
+	@echo "installed the session; 'make restart' runs the new binaries now"
+
+# Replaced binaries only run once their process restarts.
+restart:
+	systemctl --user restart osxflow.target
 
 clean:
 	rm -rf $(BINDIR)

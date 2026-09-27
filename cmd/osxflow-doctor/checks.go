@@ -98,11 +98,21 @@ func (d *doctor) homePath(p string) string {
 	return p
 }
 
-// restart is how to start one of our tools by hand, the way autostart
-// would, with its errors where the session's go.
+// restart is how to start one of our tools by hand. The supervised ones
+// go through systemd, so that it goes on restarting them; the fix says
+// where the reason they stopped was logged.
 func restart(tool string) string {
-	return fmt.Sprintf(`setsid -f sh -c 'exec ~/.local/bin/%s >>"$HOME/.xsession-errors" 2>&1 </dev/null'`, tool)
+	for _, t := range ourTools {
+		if t.name == tool && t.supervised {
+			return fmt.Sprintf("journalctl --user -u osxflow@%s says why it stopped; then: systemctl --user restart osxflow@%s", tool, tool)
+		}
+	}
+	return fmt.Sprintf(`look in ~/.xsession-errors for why it stopped, then: setsid -f sh -c 'exec ~/.local/bin/%s >>"$HOME/.xsession-errors" 2>&1 </dev/null'`, tool)
 }
+
+// installSession is the fix for anything the session's systemd setup is
+// missing.
+const installSession = "make install-session, in the osxflow repository"
 
 func (d *doctor) run() {
 	d.checkSessionType()
@@ -111,6 +121,7 @@ func (d *doctor) run() {
 	d.checkBusNames()
 	d.checkDBusOverrides()
 	d.checkMasks()
+	d.checkSupervision()
 	d.checkAutostart()
 	d.checkXfceSession()
 	d.checkShortcuts()
@@ -181,8 +192,7 @@ func (d *doctor) checkProcesses() {
 		if procs[t.name] {
 			d.add(statusOK, area, t.name+" is running", "")
 		} else {
-			d.add(statusFail, area, t.name+" is not running",
-				"look in ~/.xsession-errors for why it stopped, then: "+restart(t.name))
+			d.add(statusFail, area, t.name+" is not running", restart(t.name))
 		}
 	}
 	for _, c := range companions {
@@ -227,6 +237,9 @@ func (d *doctor) checkDBusOverrides() {
 		path := filepath.Join(dir, o.name+".service")
 		want := d.homePath(o.exec)
 		fix := fmt.Sprintf("printf '[D-BUS Service]\\nName=%s\\nExec=%s\\n' > %s", o.name, want, path)
+		if o.systemd != "" {
+			fix = fmt.Sprintf("printf '[D-BUS Service]\\nName=%s\\nExec=%s\\nSystemdService=%s\\n' > %s", o.name, want, o.systemd, path)
+		}
 		keys, err := readGroup(path, "D-BUS Service")
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
@@ -238,6 +251,10 @@ func (d *doctor) checkDBusOverrides() {
 		case keys["Name"] != o.name || keys["Exec"] != want:
 			d.add(statusFail, area, fmt.Sprintf("override for %s says Name=%s Exec=%s, want Exec=%s",
 				o.name, keys["Name"], keys["Exec"], want), fix)
+			continue
+		case keys["SystemdService"] != o.systemd:
+			d.add(statusFail, area, fmt.Sprintf("override for %s says SystemdService=%s, want %q",
+				o.name, keys["SystemdService"], o.systemd), fix)
 			continue
 		}
 		if want != "/bin/false" {
@@ -317,6 +334,47 @@ func (d *doctor) checkMasks() {
 			d.add(statusWarn, area, "the system no longer has "+m.unit+", so its mask guards nothing",
 				"if a package renamed the unit, mask the new name")
 		}
+	}
+}
+
+// checkSupervision checks that systemd starts the supervised tools at login
+// and restarts them, and that nothing else starts a second copy.
+func (d *doctor) checkSupervision() {
+	const area = "supervision"
+	unitDir := filepath.Join(d.home, ".config", "systemd", "user")
+	for _, u := range sessionUnits {
+		if _, err := os.Stat(filepath.Join(unitDir, u)); err != nil {
+			d.add(statusFail, area, fmt.Sprintf("%s: %v; nothing restarts a tool that stops", u, err), installSession)
+			continue
+		}
+		d.add(statusOK, area, u+" is installed", "")
+	}
+
+	dir := filepath.Join(d.home, ".config", "autostart")
+	path := filepath.Join(dir, sessionAutostart)
+	keys, err := readGroup(path, "Desktop Entry")
+	switch {
+	case err != nil:
+		d.add(statusFail, area, fmt.Sprintf("osxflow does not start at login: %v", err), installSession)
+	case strings.EqualFold(keys["Hidden"], "true"):
+		d.add(statusFail, area, "osxflow is hidden from autostart", "remove Hidden=true from "+path)
+	case !strings.Contains(keys["Exec"], "osxflow.target"):
+		d.add(statusFail, area, "osxflow's autostart entry does not start osxflow.target: "+keys["Exec"], installSession)
+	default:
+		d.add(statusOK, area, "osxflow starts at login", "")
+	}
+
+	// A per-tool entry from before systemd starts a second copy beside
+	// the supervised one: two docks, two trays fighting over the name.
+	for _, t := range ourTools {
+		if !t.supervised {
+			continue
+		}
+		own := filepath.Join(dir, t.name+".desktop")
+		if _, err := os.Stat(own); errors.Is(err, fs.ErrNotExist) || d.hidden(own, area) {
+			continue
+		}
+		d.add(statusFail, area, t.name+" is started twice: by systemd and by "+own, "rm "+own)
 	}
 }
 

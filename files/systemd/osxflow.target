@@ -1,0 +1,15 @@
+# The osxflow desktop: everything that has to be running for the session to
+# be usable. Started at login by ~/.config/autostart/osxflow.desktop, and
+# stopped with the X session through osxflow-session.service.
+#
+# XFCE never activates graphical-session.target, so there is nothing of the
+# system's to hang this off; see osxflow-session.service for how it ends.
+
+[Unit]
+Description=osxflow desktop (dock, menubar and its menus, notifications)
+Documentation=file://%h/go/src/github.com/mpdroog/osxflow/README.md
+BindsTo=osxflow-session.service
+After=osxflow-session.service
+Wants=osxflow@menubar.service osxflow@dock.service
+Wants=osxflow@netmenu.service osxflow@powermenu.service osxflow@soundmenu.service osxflow@bluemenu.service
+Wants=osxflow@notifyd.service

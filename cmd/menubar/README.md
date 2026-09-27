@@ -41,8 +41,11 @@ Not supported:
 
 ## How it runs
 
-It starts from XDG autostart and runs for the session. Its errors go to
-`~/.xsession-errors`, prefixed `menubar:`.
+It starts with the rest of the session, as `osxflow@menubar.service` from
+`osxflow.target`; see [files/systemd](../../files/systemd) for why. Its
+errors go to the journal, prefixed `menubar:`:
+
+    journalctl --user -u osxflow@menubar
 
 It refuses to start while another tray owns the watcher name: stop
 xfce4-panel first (`xfce4-panel --quit`), or waybar under labwc.
@@ -113,13 +116,11 @@ needs, and two bars would reserve two strips:
 
 To go back, start waybar again. Nothing has to be reconfigured either way.
 
-**Autostart** with `~/.config/autostart/menubar.desktop`:
-
-    [Desktop Entry]
-    Type=Application
-    Name=Menu Bar
-    Exec=/home/mp/.local/bin/menubar
-    X-GNOME-Autostart-enabled=true
+**The session starts it.** `make install` (or `make install-session`
+alone) installs `osxflow.target`, which already wants
+`osxflow@menubar.service`; see [files/systemd](../../files/systemd) for
+why. Don't also add a `~/.config/autostart/menubar.desktop` -- that starts
+a second copy, which `osxflow-doctor` flags.
 
 **Retire xfce4-panel.** It is not an autostart entry but a client of XFCE's
 Failsafe session (`/sessions/Failsafe/Client2_*` here). Take it out by

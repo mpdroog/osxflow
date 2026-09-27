@@ -65,18 +65,10 @@ so a fresh install looks unfamiliar rather than broken.
     make dock
     install -m755 bin/dock ~/.local/bin/dock
 
-**2. Start it at login** with an autostart entry:
-
-    cat > ~/.config/autostart/dock.desktop <<EOF
-    [Desktop Entry]
-    Name=Dock
-    GenericName=Dock
-    Comment=macOS-style application dock (osxflow)
-    Exec=$HOME/.local/bin/dock
-    Terminal=false
-    Type=Application
-    X-GNOME-Autostart-enabled=true
-    EOF
+**2. Install the session.** `make install` (or `make install-session`
+alone) installs `osxflow.target` and the `osxflow@dock` service it already
+wants, which starts dock at login and restarts it if it ever stops; see
+[files/systemd](../../files/systemd) for why.
 
 **3. Stop plank starting at login.** Keep a copy of its entry, then hide it:
 
@@ -89,14 +81,11 @@ first, from `/etc/xdg/autostart/` or `/usr/share/applications/`.
 **4. Switch over now**, without logging out:
 
     pkill -x plank
-    setsid -f sh -c 'exec ~/.local/bin/dock >>"$HOME/.xsession-errors" 2>&1 </dev/null'
+    systemctl --user restart osxflow@dock
 
-Not `~/.local/bin/dock &`. Started from a terminal, the dock writes its
-errors into that terminal and dies with it; started like this, it logs
-where the autostarted one will from the next login on.
-
-To go back, restore `plank.desktop.bak`, delete `dock.desktop`, and log out
-and back in.
+To go back, restore `plank.desktop.bak`, remove `osxflow@dock.service` from
+`Wants=` in `files/systemd/osxflow.target`, run `make install-session`, and
+`systemctl --user stop osxflow@dock`.
 
 ## Debugging
 
@@ -105,9 +94,10 @@ matched it to and why, and the item list it would build. That answers the
 question this design actually raises in practice: why is something showing
 up in the dock, or not?
 
-Errors are always logged to stderr, which for the autostarted dock is
-`~/.xsession-errors`; every line starts with `dock:`. That covers X errors,
-a window list that could not be read, a folder a stack could not list, and
+Errors are always logged to stderr, which under systemd is the journal:
+`journalctl --user -u osxflow@dock`. Every line starts with `dock:`. That
+covers X errors, a window list that could not be read, a folder a stack
+could not list, and
 the X connection going away -- which ends the dock with an exit status of 1
 rather than silently. Those that can repeat -- per frame, per window-list
 change -- are limited to a few lines a minute each, and the lines held back

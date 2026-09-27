@@ -53,10 +53,10 @@ Dismissing the password dialog just leaves things as they were.
     make bluemenu
     install -m755 bin/bluemenu ~/.local/bin/bluemenu
 
-**2. Start it at login:**
-
-    printf '[Desktop Entry]\nType=Application\nName=Bluetooth Menu\nExec=%s/.local/bin/bluemenu\nX-GNOME-Autostart-enabled=true\n' "$HOME" \
-      > ~/.config/autostart/bluemenu.desktop
+**2. Install the session.** `make install` (or `make install-session`
+alone) installs `osxflow.target` and the `osxflow@bluemenu` service it
+already wants, which starts bluemenu at login and restarts it if it ever
+stops; see [files/systemd](../../files/systemd) for why.
 
 **3. Retire blueman.** Its applet is the other pairing agent, so it has to
 stay off, and three things can start it: autostart, D-Bus activation (which
@@ -74,18 +74,20 @@ installed:
 
 **4. Start it now:**
 
-    setsid -f sh -c 'exec "$HOME/.local/bin/bluemenu" >>"$HOME/.xsession-errors" 2>&1 </dev/null'
+    systemctl --user restart osxflow@bluemenu
 
 ### Updating
 
     make bluemenu && install -m755 bin/bluemenu ~/.local/bin/bluemenu
-    pkill -x bluemenu
-    setsid -f sh -c 'exec "$HOME/.local/bin/bluemenu" >>"$HOME/.xsession-errors" 2>&1 </dev/null'
+    systemctl --user restart osxflow@bluemenu
 
 ### Uninstalling
 
-    pkill -x bluemenu
-    rm ~/.config/autostart/bluemenu.desktop ~/.config/autostart/blueman.desktop
+Remove `osxflow@bluemenu.service` from `Wants=` in
+`files/systemd/osxflow.target`, run `make install-session`, then:
+
+    systemctl --user stop osxflow@bluemenu
+    rm ~/.config/autostart/blueman.desktop
     rm ~/.local/share/dbus-1/services/org.blueman.Applet.service
     systemctl --user unmask blueman-applet.service
     setsid -f blueman-applet >/dev/null 2>&1

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=osxflow
+Comment=Starts the osxflow desktop under systemd, which restarts any tool that stops
+Exec=sh -c 'systemctl --user import-environment DISPLAY XAUTHORITY && exec systemctl --user restart osxflow.target'
+X-GNOME-Autostart-enabled=true

@@ -1,0 +1,28 @@
+# One osxflow tool, supervised: systemctl --user status osxflow@dock
+#
+# Each of these has to be running for the desktop to be usable, and before
+# this unit each was started once by autostart and nothing noticed it dying:
+# on 2026-09-27 the dock and the menubar exited at login and the session was
+# a wallpaper until someone went looking. So it is restarted whenever it
+# stops, clean exit included -- none of them has a reason to end on its
+# own. The delay grows from 1s to 30s so a tool that cannot start (a bad
+# build, a missing library) retries twice a minute instead of spinning, and
+# there is no start limit: giving up is what left the desktop empty, and a
+# retry every 30s costs nothing.
+#
+# Logs go to the journal: journalctl --user -u osxflow@dock
+
+[Unit]
+Description=osxflow %i
+PartOf=osxflow.target
+After=osxflow-session.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/%i
+SyslogIdentifier=%i
+Restart=always
+RestartSec=1s
+RestartSteps=6
+RestartMaxDelaySec=30s
