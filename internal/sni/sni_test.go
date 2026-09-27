@@ -222,3 +222,30 @@ func TestFromImageSubImage(t *testing.T) {
 		t.Errorf("FromImage(sub) = %+v", got)
 	}
 }
+
+// A connection that goes closes the item's signal channel. Registering
+// again must stop there rather than spin on it for as long as the process
+// lives.
+func TestStopsWhenTheBusGoes(t *testing.T) {
+	addr := dbustest.Start(t)
+	it := &Item{
+		conn:       dbustest.Conn(t, addr),
+		registered: make(chan error),
+		signals:    make(chan *dbus.Signal),
+		done:       make(chan struct{}),
+	}
+	close(it.signals)
+	exited := make(chan struct{})
+	go func() {
+		it.stayRegistered()
+		close(exited)
+	}()
+	if err := registration(t, it); !errors.Is(err, ErrNoWatcher) {
+		t.Fatalf("registration with no tray: %v, want ErrNoWatcher", err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("still running after its signal channel closed")
+	}
+}

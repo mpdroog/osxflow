@@ -245,7 +245,12 @@ func (w *Watcher) announce(member string, ref Ref, list []string) error {
 func (w *Watcher) watchOwners() {
 	for {
 		select {
-		case sig := <-w.signals:
+		case sig, open := <-w.signals:
+			if !open {
+				// godbus closes it when the connection goes, and with it
+				// every item; carrying on would only spin.
+				return
+			}
 			if name, ok := nameLost(sig); ok {
 				if err := w.drop(name); err != nil {
 					w.report(err)

@@ -11,6 +11,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"errors"
 	"flag"
@@ -387,6 +388,10 @@ func (a *app) loop() error {
 			a.handleWayland(e)
 		case err := <-xGone:
 			return err
+		case <-a.bus.Context().Done():
+			// Without this the closed signal channel below is ready for
+			// ever, and the loop spins on it instead of ending.
+			return fmt.Errorf("lost the session bus: %w", context.Cause(a.bus.Context()))
 		case s := <-a.windowsC:
 			a.windows, a.windowsC = s, nil
 			a.updateApp()
@@ -394,7 +399,12 @@ func (a *app) loop() error {
 			a.syncItems()
 		case err := <-a.watcher.Errors():
 			log.Print(err)
-		case sig := <-signals:
+		case sig, ok := <-signals:
+			if !ok {
+				// godbus closes it as the connection goes, a moment before
+				// the context above says so.
+				return errors.New("lost the session bus")
+			}
 			if sni.Changed(sig) {
 				a.itemChanged(sig.Sender, string(sig.Path))
 			}
