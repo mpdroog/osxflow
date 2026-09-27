@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -752,5 +753,48 @@ func TestWrapInTerminal(t *testing.T) {
 	}
 	if !filepath.IsAbs(argv[0]) {
 		t.Errorf("argv[0] = %q, want an absolute path to the terminal", argv[0])
+	}
+}
+
+// Outside a systemd service there is no service cgroup to leave, and argv
+// runs as it is.
+func TestInOwnScopeOutsideAServiceIsUnchanged(t *testing.T) {
+	t.Setenv("INVOCATION_ID", "")
+	argv := []string{"firefox", "--new-window"}
+	if got := InOwnScope(argv, "Firefox"); !slices.Equal(got, argv) {
+		t.Errorf("InOwnScope = %q, want %q", got, argv)
+	}
+}
+
+// In a service, argv runs in a scope of its own, after every systemd-run
+// option so that none of argv is read as one.
+func TestInOwnScopeInAServiceWrapsInSystemdRun(t *testing.T) {
+	dir := t.TempDir()
+	run := filepath.Join(dir, "systemd-run")
+	if err := os.WriteFile(run, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("INVOCATION_ID", "0123456789abcdef")
+	got := InOwnScope([]string{"firefox", "--scope"}, "Firefox")
+	if got[0] != run || !slices.Contains(got, "--scope") || !slices.Contains(got, "--description=Firefox") {
+		t.Errorf("InOwnScope = %q, want %s --scope ... --description=Firefox", got, run)
+	}
+	if want := []string{"--", "firefox", "--scope"}; !slices.Equal(got[len(got)-3:], want) {
+		t.Errorf("InOwnScope ends %q, want %q", got[len(got)-3:], want)
+	}
+}
+
+// A service without systemd-run still starts the app, in its own cgroup.
+func TestInOwnScopeWithoutSystemdRunIsUnchanged(t *testing.T) {
+	logged := captureLog(t)
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("INVOCATION_ID", "0123456789abcdef")
+	argv := []string{"firefox"}
+	if got := InOwnScope(argv, "Firefox"); !slices.Equal(got, argv) {
+		t.Errorf("InOwnScope = %q, want %q", got, argv)
+	}
+	if !strings.Contains(logged.String(), "no systemd-run") {
+		t.Errorf("logged %q, want the missing systemd-run", logged.String())
 	}
 }

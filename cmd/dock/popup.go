@@ -19,6 +19,7 @@ import (
 
 	"github.com/mpdroog/osxflow/internal/dock"
 	"github.com/mpdroog/osxflow/internal/geom"
+	"github.com/mpdroog/osxflow/internal/launch"
 	"github.com/mpdroog/osxflow/internal/paint"
 	"github.com/mpdroog/osxflow/internal/stack"
 	"github.com/mpdroog/osxflow/internal/text"
@@ -421,6 +422,10 @@ func openTarget(target string) error {
 	if err != nil {
 		return fmt.Errorf("no handler to open %s: %w", target, err)
 	}
+	// The handler -- the file manager, usually -- outlives the click and
+	// must not stop with the dock; see launch.InOwnScope.
+	argv = launch.InOwnScope(append([]string{bin}, argv[1:]...), filepath.Base(bin)+" "+target)
+	bin = argv[0]
 
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
