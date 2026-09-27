@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -114,18 +115,61 @@ func newX11(conn *xgbutil.XUtil, owned bool) (Server, error) {
 // property is routinely missing for a moment.
 const wmStartupGrace = 30 * time.Second
 
-// awaitClientList waits for _NET_CLIENT_LIST to exist. Only an unset
-// property is waited out: that is a window manager still starting. A
-// malformed one will not fix itself, so it fails at once.
+// awaitClientList waits for the window manager to be ready to answer
+// _NET_CLIENT_LIST. An unset property is waited out, since that is a
+// window manager still starting, unless the window manager is already up
+// and advertises the property: xfwm4 deletes _NET_CLIENT_LIST outright
+// while it manages no windows, which at login, before the dock and
+// menubar have mapped, is the normal state. A malformed one will not fix
+// itself, so it fails at once.
 func (x *x11) awaitClientList() error {
 	deadline := time.Now().Add(wmStartupGrace)
 	for {
 		_, err := x.windowList("_NET_CLIENT_LIST")
+		if errors.Is(err, ErrPropUnset) {
+			advertised, advErr := x.advertisesClientList()
+			if advErr != nil {
+				return advErr
+			}
+			if advertised {
+				return nil
+			}
+		}
 		if err == nil || !errors.Is(err, ErrPropUnset) || time.Now().After(deadline) {
 			return err
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
+}
+
+// advertisesClientList reports whether a window manager is running and
+// lists _NET_CLIENT_LIST in _NET_SUPPORTED, which makes an unset client
+// list mean "no windows" rather than "no window manager". Either property
+// being unset is a window manager not up yet, which is false, not an
+// error.
+func (x *x11) advertisesClientList() (bool, error) {
+	if _, err := x.windowList("_NET_SUPPORTING_WM_CHECK"); err != nil {
+		if errors.Is(err, ErrPropUnset) {
+			return false, nil
+		}
+		return false, err
+	}
+	r, err := x.props.Get(x.root, "_NET_SUPPORTED")
+	if errors.Is(err, ErrPropUnset) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading _NET_SUPPORTED: %w", err)
+	}
+	supported, err := DecodeAtoms(r)
+	if err != nil {
+		return false, fmt.Errorf("reading _NET_SUPPORTED: %w", err)
+	}
+	want, err := x.props.Atom("_NET_CLIENT_LIST")
+	if err != nil {
+		return false, err
+	}
+	return slices.Contains(supported, want), nil
 }
 
 // Windows lists managed windows bottom-to-top in stacking order.
@@ -172,6 +216,17 @@ func (x *x11) clientIDs() ([]xproto.Window, error) {
 		return ids, nil
 	}
 	ids, listErr := x.windowList("_NET_CLIENT_LIST")
+	if errors.Is(stackErr, ErrPropUnset) && errors.Is(listErr, ErrPropUnset) {
+		// xfwm4 deletes both lists when it closes its last window, rather
+		// than emptying them.
+		advertised, err := x.advertisesClientList()
+		if err != nil {
+			return nil, errors.Join(listErr, err)
+		}
+		if advertised {
+			return nil, nil
+		}
+	}
 	if listErr != nil {
 		return nil, errors.Join(stackErr, listErr)
 	}
