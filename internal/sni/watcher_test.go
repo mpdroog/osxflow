@@ -223,3 +223,20 @@ func TestChanged(t *testing.T) {
 		t.Error("Changed(nil)")
 	}
 }
+
+// As with an item: a closed signal channel is the connection gone, and
+// the watcher's goroutine ends rather than spinning on it.
+func TestWatcherStopsWhenTheBusGoes(t *testing.T) {
+	w := &Watcher{signals: make(chan *dbus.Signal), done: make(chan struct{})}
+	close(w.signals)
+	exited := make(chan struct{})
+	go func() {
+		w.watchOwners()
+		close(exited)
+	}()
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("still running after its signal channel closed")
+	}
+}

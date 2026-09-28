@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jezek/xgb/xproto"
 )
@@ -348,6 +349,67 @@ func TestClientListStackingFallback(t *testing.T) {
 		_, err := x.Windows()
 		if !errors.Is(err, stackErr) || !errors.Is(err, listErr) {
 			t.Errorf("Windows error = %v, want both failures", err)
+		}
+	})
+}
+
+// wmUp gives the root window what a running window manager that supports
+// _NET_CLIENT_LIST sets, without the client list itself.
+func (f *fakeProps) wmUp() {
+	const atomClientList xproto.Atom = 600
+	f.atoms["_NET_CLIENT_LIST"] = atomClientList
+	f.set(rootWin, "_NET_SUPPORTING_WM_CHECK", card32Reply(0x99))
+	f.set(rootWin, "_NET_SUPPORTED", card32Reply(uint32(atomTypeNormal), uint32(atomClientList)))
+}
+
+// xfwm4 deletes _NET_CLIENT_LIST and _NET_CLIENT_LIST_STACKING while it
+// manages no windows, which is the state at login before anything has
+// opened. Treating that as "no window manager" killed the dock and the
+// menubar at login on 2026-09-27.
+func TestUnsetClientListUnderRunningWM(t *testing.T) {
+	t.Run("startup does not wait", func(t *testing.T) {
+		f := newFakeProps()
+		f.wmUp()
+		x, _ := testX11(f)
+		done := make(chan error, 1)
+		go func() { done <- x.awaitClientList() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("awaitClientList = %v, want nil", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("awaitClientList waited for a list a running window manager will not publish")
+		}
+	})
+
+	t.Run("windows is empty, not an error", func(t *testing.T) {
+		f := newFakeProps()
+		f.wmUp()
+		x, logged := testX11(f)
+		wins, err := x.Windows()
+		if err != nil || len(wins) != 0 {
+			t.Fatalf("Windows = %v, %v; want none and no error", wins, err)
+		}
+		if len(*logged) != 0 {
+			t.Errorf("logged %q for an empty session", *logged)
+		}
+	})
+
+	t.Run("without a window manager it is still an error", func(t *testing.T) {
+		x, _ := testX11(newFakeProps())
+		if _, err := x.Windows(); !errors.Is(err, ErrPropUnset) {
+			t.Errorf("Windows error = %v, want ErrPropUnset", err)
+		}
+	})
+
+	t.Run("not advertised is still an error", func(t *testing.T) {
+		f := newFakeProps()
+		f.wmUp()
+		f.set(rootWin, "_NET_SUPPORTED", card32Reply(uint32(atomTypeNormal)))
+		x, _ := testX11(f)
+		if _, err := x.Windows(); !errors.Is(err, ErrPropUnset) {
+			t.Errorf("Windows error = %v, want ErrPropUnset", err)
 		}
 	})
 }

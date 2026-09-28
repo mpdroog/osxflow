@@ -38,10 +38,10 @@ over D-Bus and neither needing root.
     make powermenu
     install -m755 bin/powermenu ~/.local/bin/powermenu
 
-**2. Start it at login:**
-
-    printf '[Desktop Entry]\nType=Application\nName=Battery Menu\nExec=%s/.local/bin/powermenu\nX-GNOME-Autostart-enabled=true\n' "$HOME" \
-      > ~/.config/autostart/powermenu.desktop
+**2. Install the session.** `make install` (or `make install-session`
+alone) installs `osxflow.target` and the `osxflow@powermenu` service it
+already wants, which starts powermenu at login and restarts it if it ever
+stops; see [files/systemd](../../files/systemd) for why.
 
 **3. Take the power manager plugin off the panel.** Find its id, and the
 panel's list of plugin ids:
@@ -60,24 +60,24 @@ the id back restores it as it was:
 
 **4. Start it now:**
 
-    setsid -f sh -c 'exec "$HOME/.local/bin/powermenu" >>"$HOME/.xsession-errors" 2>&1 </dev/null'
+    systemctl --user restart osxflow@powermenu
 
 ### Updating
 
     make powermenu && install -m755 bin/powermenu ~/.local/bin/powermenu
-    pkill -x powermenu
-    setsid -f sh -c 'exec "$HOME/.local/bin/powermenu" >>"$HOME/.xsession-errors" 2>&1 </dev/null'
+    systemctl --user restart osxflow@powermenu
 
 ### Uninstalling
 
-Put the plugin's id back where it was in the list, restart the panel, and
-stop powermenu:
+Put the plugin's id back where it was in the list and restart the panel.
+Then remove `osxflow@powermenu.service` from `Wants=` in
+`files/systemd/osxflow.target`, run `make install-session`, and stop
+powermenu:
 
     xfconf-query -c xfce4-panel -p /panels/panel-1/plugin-ids --force-array \
       -t int -s 1 -t int -s 7 -t int -s 8 -t int -s 10 -t int -s 11 -t int -s 12 -t int -s 13
     xfce4-panel -r
-    rm ~/.config/autostart/powermenu.desktop
-    pkill -x powermenu
+    systemctl --user stop osxflow@powermenu
 
 ## Flags
 

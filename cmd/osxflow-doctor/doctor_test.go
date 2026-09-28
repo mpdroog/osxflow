@@ -89,11 +89,19 @@ func healthy(t *testing.T) (*doctor, *fakeSystem) {
 	}
 	for _, o := range dbusOverrides {
 		target := strings.Replace(o.exec, "~", home, 1)
-		write(t, filepath.Join(sub(home, ".local/share/dbus-1/services"), o.name+".service"),
-			fmt.Sprintf("[D-BUS Service]\nName=%s\nExec=%s\n", o.name, target), 0o644)
+		content := fmt.Sprintf("[D-BUS Service]\nName=%s\nExec=%s\n", o.name, target)
+		if o.systemd != "" {
+			content += "SystemdService=" + o.systemd + "\n"
+		}
+		write(t, filepath.Join(sub(home, ".local/share/dbus-1/services"), o.name+".service"), content, 0o644)
 		write(t, filepath.Join(sub(root, "usr/share/dbus-1/services"), "system-"+o.name+".service"),
 			fmt.Sprintf("[D-BUS Service]\nName=%s\nExec=/usr/bin/whatever\n", o.name), 0o644)
 	}
+	for _, u := range sessionUnits {
+		write(t, filepath.Join(sub(home, ".config/systemd/user"), u), "[Unit]\n", 0o644)
+	}
+	write(t, filepath.Join(sub(home, ".config/autostart"), sessionAutostart),
+		"[Desktop Entry]\nExec=sh -c 'systemctl --user restart osxflow.target'\n", 0o644)
 	for _, m := range masks {
 		link := filepath.Join(sub(home, ".config/systemd/user"), m.unit)
 		if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
@@ -234,6 +242,9 @@ func TestToolNotRunning(t *testing.T) {
 	d, sys := healthy(t)
 	delete(sys.procs, "dock")
 	expectOne(t, d, statusFail, "dock is not running")
+	if fix := problems(d.results)[0].fix; !strings.Contains(fix, "systemctl --user restart osxflow@dock") {
+		t.Errorf("fix %q does not restart it through systemd", fix)
+	}
 }
 
 func TestCompanionNotRunning(t *testing.T) {
@@ -309,10 +320,48 @@ func TestNewSystemAutostart(t *testing.T) {
 
 func TestOurAutostartMissing(t *testing.T) {
 	d, _ := healthy(t)
-	if err := os.Remove(sub(d.home, ".config/autostart/menubar.desktop")); err != nil {
+	if err := os.Remove(sub(d.home, ".config/autostart/wallpaper.desktop")); err != nil {
 		t.Fatal(err)
 	}
-	expectOne(t, d, statusFail, "menubar does not start at login")
+	expectOne(t, d, statusFail, "wallpaper does not start at login")
+}
+
+func TestSessionUnitMissing(t *testing.T) {
+	d, _ := healthy(t)
+	if err := os.Remove(sub(d.home, ".config/systemd/user/osxflow@.service")); err != nil {
+		t.Fatal(err)
+	}
+	expectOne(t, d, statusFail, "nothing restarts a tool that stops")
+}
+
+func TestSessionAutostartMissing(t *testing.T) {
+	d, _ := healthy(t)
+	if err := os.Remove(sub(d.home, ".config/autostart/osxflow.desktop")); err != nil {
+		t.Fatal(err)
+	}
+	expectOne(t, d, statusFail, "osxflow does not start at login")
+}
+
+// The autostart entry a tool had before systemd supervised it starts a
+// second copy.
+func TestStartedTwice(t *testing.T) {
+	d, _ := healthy(t)
+	path := sub(d.home, ".config/autostart/dock.desktop")
+	write(t, path, "[Desktop Entry]\nExec=/x/dock\n", 0o644)
+	expectOne(t, d, statusFail, "dock is started twice")
+
+	write(t, path, "[Desktop Entry]\nHidden=true\n", 0o644)
+	d.results = nil
+	if got := problems(runChecks(d)); len(got) != 0 {
+		t.Errorf("a hidden entry starts nothing, but: %+v", got)
+	}
+}
+
+func TestNotificationsOutsideSystemd(t *testing.T) {
+	d, _ := healthy(t)
+	write(t, sub(d.home, ".local/share/dbus-1/services/org.freedesktop.Notifications.service"),
+		"[D-BUS Service]\nName=org.freedesktop.Notifications\nExec="+sub(d.home, ".local/bin/notifyd")+"\n", 0o644)
+	expectOne(t, d, statusFail, "SystemdService=")
 }
 
 func TestNotInstalled(t *testing.T) {

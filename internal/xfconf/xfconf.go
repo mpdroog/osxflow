@@ -9,8 +9,10 @@
 package xfconf
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -35,13 +37,27 @@ type Change struct {
 	Err      error
 }
 
+// Timeout bounds every call to xfconfd. It answers in well under a
+// millisecond; one that takes seconds is stuck, and without a bound the
+// caller -- a menu's or notifyd's main loop -- would wait with it until the
+// bus gives up on the reply, which dbus-daemon does only after 25 seconds.
+const Timeout = 2 * time.Second
+
 // Client talks to xfconfd.
 type Client struct {
-	conn *dbus.Conn
+	conn    *dbus.Conn
+	timeout time.Duration
 }
 
 // New returns a client using conn, which it does not own.
-func New(conn *dbus.Conn) *Client { return &Client{conn: conn} }
+func New(conn *dbus.Conn) *Client { return &Client{conn: conn, timeout: Timeout} }
+
+// call calls one of xfconfd's methods, giving up after c.timeout.
+func (c *Client) call(method string, args ...any) *dbus.Call {
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+	return c.conn.Object(BusName, ObjectPath).CallWithContext(ctx, Interface+"."+method, 0, args...)
+}
 
 // ErrNotSet is returned by Get for a property that has never been set,
 // which in xfconf means it holds its program's built-in default.
@@ -60,7 +76,7 @@ var ErrMalformed = errors.New("malformed xfconf signal")
 // Get reads one property.
 func (c *Client) Get(channel, property string) (any, error) {
 	var v dbus.Variant
-	err := c.conn.Object(BusName, ObjectPath).Call(Interface+".GetProperty", 0, channel, property).Store(&v)
+	err := c.call("GetProperty", channel, property).Store(&v)
 	if err != nil {
 		var dbusErr dbus.Error
 		if errors.As(err, &dbusErr) {
@@ -84,7 +100,7 @@ func (c *Client) Get(channel, property string) (any, error) {
 // []dbus.Variant, as with Get.
 func (c *Client) GetAll(channel, base string) (map[string]any, error) {
 	var props map[string]dbus.Variant
-	err := c.conn.Object(BusName, ObjectPath).Call(Interface+".GetAllProperties", 0, channel, base).Store(&props)
+	err := c.call("GetAllProperties", channel, base).Store(&props)
 	if err != nil {
 		var dbusErr dbus.Error
 		if errors.As(err, &dbusErr) {
@@ -110,8 +126,7 @@ func (c *Client) GetAll(channel, base string) (map[string]any, error) {
 // owns the setting (xfce4-power-manager for presentation mode, say) acts on
 // it at once, as it would on a change made in its own settings dialog.
 func (c *Client) Set(channel, property string, value any) error {
-	err := c.conn.Object(BusName, ObjectPath).
-		Call(Interface+".SetProperty", 0, channel, property, dbus.MakeVariant(value)).Err
+	err := c.call("SetProperty", channel, property, dbus.MakeVariant(value)).Err
 	if err == nil {
 		return nil
 	}

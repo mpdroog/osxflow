@@ -86,9 +86,14 @@ type daemon struct {
 	// compositor under Wayland, the window manager under X11. See
 	// onActiveMonitor for why nothing here can work it out for itself.
 	//
-	// Nil when it could not be opened, which costs the placement and
-	// nothing else: banners fall back to the whole screen.
-	server xwin.Server
+	// Nil until it could be opened, which costs the placement and nothing
+	// else: banners fall back to the whole screen. serverC delivers it
+	// once it is open; see xwin.Await.
+	server  xwin.Server
+	serverC <-chan xwin.Server
+
+	// quit closes when the daemon does, which stops serverC's retrying.
+	quit chan struct{}
 
 	// area is the part of the screen not reserved by panels, narrowed to
 	// the monitor the user is working on, which is what keeps the banners
@@ -138,6 +143,10 @@ type daemon struct {
 
 var _ notify.Handler = (*daemon)(nil)
 
+// serverRetry is how long notifyd waits between attempts to find out
+// which monitor is active, after one has failed.
+const serverRetry = 5 * time.Second
+
 // defaultTimeout is xfce4-notifyd's default, for when its setting cannot
 // be read.
 const defaultTimeout = 5 * time.Second
@@ -165,19 +174,21 @@ func newDaemon(scaleOverride float64, verbose bool) (*daemon, error) {
 		failed:         make(attempts),
 		defaultTimeout: defaultTimeout,
 		lim:            &errlog.Limiter{Burst: logBurst, Per: logEvery},
+		quit:           make(chan struct{}),
 		verbose:        verbose,
 	}
 	d.screen = xproto.Setup(d.conn).DefaultScreen(d.conn)
 
-	// Opened before the first updateWorkArea below, which is what uses it.
-	// Not closed in close(): under X11 this shares the daemon's own
-	// connection, and closing it there would close the connection twice.
-	if server, serverErr := xwin.NewServerWith(X); serverErr != nil {
-		log.Printf("cannot tell which monitor is active; banners will use the "+
-			"whole screen: %v", serverErr)
-	} else {
-		d.server = server
-	}
+	// In the background rather than here: opening it waits for a window
+	// manager, for longer than the bus waits for this daemon to claim its
+	// name, and at login the window manager may not be up yet. Until it
+	// is, banners use the whole screen. Not closed in close(): under X11
+	// this shares the daemon's own connection, and closing it there would
+	// close the connection twice.
+	d.serverC = xwin.Await(func() (xwin.Server, error) { return xwin.NewServerWith(X) },
+		serverRetry, func(format string, args ...any) {
+			log.Printf("which monitor is active: "+format, args...)
+		}, d.quit)
 
 	// abandon undoes a half-made daemon. What cleaning up turns up is
 	// logged: the error being returned is the one that says why.
@@ -349,6 +360,9 @@ func (d *daemon) run() error {
 		case call := <-d.srv.Calls():
 			call()
 
+		case s := <-d.serverC:
+			d.server, d.serverC = s, nil
+
 		case ch, ok := <-d.settings:
 			switch {
 			case !ok:
@@ -503,6 +517,7 @@ func (d *daemon) debugf(format string, args ...any) {
 // before that could never report an error anyway.
 func (d *daemon) close() error {
 	var errs []error
+	close(d.quit)
 	// A bus already lost has been reported as the reason for stopping;
 	// releasing the name on it and closing it again could only fail again.
 	busUp := d.bus != nil && d.bus.Connected()

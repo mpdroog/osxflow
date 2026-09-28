@@ -252,7 +252,14 @@ func (it *Item) stayRegistered() {
 	}
 	for {
 		select {
-		case sig := <-it.signals:
+		case sig, ok := <-it.signals:
+			if !ok {
+				// godbus closes it when the connection goes. Carrying on
+				// would spin on it; there is no tray to register with on
+				// a bus that is gone, and the caller hears of that from
+				// the connection itself.
+				return
+			}
 			if sig == nil || !watcherAppeared(sig) {
 				continue
 			}

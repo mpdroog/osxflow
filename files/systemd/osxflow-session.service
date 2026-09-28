@@ -1,0 +1,19 @@
+# Lives exactly as long as the X session, so that osxflow.target, bound to
+# it, ends when the session does.
+#
+# Without it, logging out kills the X server, every tool exits with "X
+# connection broken", and Restart= restarts them against a display that is
+# gone -- until the next login, forever. xprop -spy holds an X connection
+# and exits the moment the server does; the property it watches is
+# incidental, and its output is thrown away.
+
+[Unit]
+Description=osxflow: tracks the lifetime of the X session
+StopWhenUnneeded=yes
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/xprop -root -spy _NET_SUPPORTING_WM_CHECK
+StandardOutput=null
+# Ending is the whole point; restarting it would outlive the session.
+Restart=no

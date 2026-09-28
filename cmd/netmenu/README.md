@@ -79,31 +79,35 @@ the whole update, and it rebuilds them from `address-data` and
 Then check it: with nm-applet stopped, take the VPN down and up again. It
 should connect without anything asking for a secret.
 
-**3. Start it at login, and stop nm-applet starting.** Both are autostart
-entries; nm-applet's is hidden with a user copy, so the package stays
-installed:
+**3. Stop nm-applet starting at login.** It is an autostart entry; hide it
+with a user copy, so the package stays installed:
 
-    printf '[Desktop Entry]\nType=Application\nName=Network Menu\nExec=%s/.local/bin/netmenu\nX-GNOME-Autostart-enabled=true\n' "$HOME" \
-      > ~/.config/autostart/netmenu.desktop
     cp /etc/xdg/autostart/nm-applet.desktop ~/.config/autostart/nm-applet.desktop.bak
     cp /etc/xdg/autostart/nm-applet.desktop ~/.config/autostart/
     printf 'Hidden=true\nX-GNOME-Autostart-enabled=false\n' >> ~/.config/autostart/nm-applet.desktop
 
+netmenu itself starts with the rest of the session: `make install` wants
+`osxflow@netmenu.service` from `osxflow.target`; see
+[files/systemd](../../files/systemd) for why.
+
 **4. Switch over now:**
 
     pkill -x nm-applet
-    setsid ~/.local/bin/netmenu 2>>~/.xsession-errors &
+    systemctl --user restart osxflow@netmenu
 
 ### Updating
 
     make netmenu && install -m755 bin/netmenu ~/.local/bin/netmenu
-    pkill -x netmenu; setsid ~/.local/bin/netmenu 2>>~/.xsession-errors &
+    systemctl --user restart osxflow@netmenu
 
 ### Uninstalling
 
-    rm ~/.config/autostart/netmenu.desktop ~/.config/autostart/nm-applet.desktop
-    rm ~/.config/autostart/nm-applet.desktop.bak
-    pkill -x netmenu; setsid nm-applet >/dev/null 2>&1 &
+Remove `osxflow@netmenu.service` from `Wants=` in
+`files/systemd/osxflow.target`, run `make install-session`, then:
+
+    systemctl --user stop osxflow@netmenu
+    rm ~/.config/autostart/nm-applet.desktop ~/.config/autostart/nm-applet.desktop.bak
+    setsid nm-applet >/dev/null 2>&1 &
 
 A VPN secret moved in step 2 stays with NetworkManager, which nm-applet
 handles too.

@@ -8,25 +8,36 @@ package main
 // Every entry says what it guards against, because a check that fails in
 // three years is only useful if it says why it mattered.
 
-// ourTools are installed in ~/.local/bin, and the autostarted ones are
-// expected to be running.
+// ourTools are installed in ~/.local/bin, and the ones expected to be
+// running are.
 var ourTools = []struct {
-	name      string
-	autostart bool // started at login from ~/.config/autostart/<name>.desktop
-	running   bool // expected to be running all session
+	name       string
+	autostart  bool // started at login from ~/.config/autostart/<name>.desktop
+	supervised bool // started and restarted by systemd as osxflow@<name>.service
+	running    bool // expected to be running all session
 }{
-	{"menubar", true, true},
-	{"dock", true, true},
-	{"netmenu", true, true},
-	{"powermenu", true, true},
-	{"soundmenu", true, true},
-	{"bluemenu", true, true},
-	{"wallpaper", true, false}, // sets the background and exits
-	{"notifyd", false, false},  // started by D-Bus on the first notification
-	{"launcher", false, false}, // Cmd+Space, through gokeyd and the Alt+F1 shortcut
-	{"macmenu", false, false},  // run by menubar when Tux is clicked
-	{"unpack", false, false},   // run by double-clicking an archive
+	{"menubar", false, true, true},
+	{"dock", false, true, true},
+	{"netmenu", false, true, true},
+	{"powermenu", false, true, true},
+	{"soundmenu", false, true, true},
+	{"bluemenu", false, true, true},
+	{"notifyd", false, true, true},
+	{"wallpaper", true, false, false}, // sets the background and exits
+	{"launcher", false, false, false}, // Cmd+Space, through gokeyd and the Alt+F1 shortcut
+	{"macmenu", false, false, false},  // run by menubar when Tux is clicked
+	{"unpack", false, false, false},   // run by double-clicking an archive
 }
+
+// sessionUnits are what `make install-session` puts in
+// ~/.config/systemd/user. Without them nothing starts the supervised tools
+// at login, and nothing restarts one that stops -- which is how a dock that
+// exited at login on 2026-09-27 left a desktop that was only a wallpaper.
+var sessionUnits = []string{"osxflow.target", "osxflow-session.service", "osxflow@.service"}
+
+// sessionAutostart starts osxflow.target at login, from inside the X
+// session, so the units get its DISPLAY.
+const sessionAutostart = "osxflow.desktop"
 
 // retired programs must not be running: each is what an osxflow tool
 // replaced, and running both means two of something -- two trays, two
@@ -71,12 +82,15 @@ var busNames = []struct {
 // that win over the system's, so that D-Bus activation starts ours, or
 // nothing, instead of what the system ships.
 var dbusOverrides = []struct {
-	name, exec, why string
+	name, exec, systemd, why string
 }{
-	{"org.freedesktop.Notifications", "~/.local/bin/notifyd", "notifications start notifyd, not xfce4-notifyd"},
-	{"org.blueman.Applet", "/bin/false", "blueman-manager cannot start blueman's applet, a second pairing agent"},
-	{"org.gnome.OnlineAccounts", "/bin/false", "GNOME Online Accounts stays off"},
-	{"org.gnome.Identity", "/bin/false", "GNOME's identity service stays off"},
+	// SystemdService: a notification that arrives before osxflow.target
+	// has started notifyd starts the supervised one, not a second copy
+	// outside systemd that nothing restarts.
+	{"org.freedesktop.Notifications", "~/.local/bin/notifyd", "osxflow@notifyd.service", "notifications start notifyd, not xfce4-notifyd"},
+	{"org.blueman.Applet", "/bin/false", "", "blueman-manager cannot start blueman's applet, a second pairing agent"},
+	{"org.gnome.OnlineAccounts", "/bin/false", "", "GNOME Online Accounts stays off"},
+	{"org.gnome.Identity", "/bin/false", "", "GNOME's identity service stays off"},
 }
 
 // masks are user systemd units linked to /dev/null.
@@ -137,6 +151,7 @@ var commands = []struct {
 	names, usedFor string
 	required       bool
 }{
+	{"xprop", "osxflow-session.service: stops the tools when the X session ends", true},
 	{"xfce4-session-logout", "macmenu: Sleep, Restart, Shut Down, Log Out", true},
 	{"xflock4", "macmenu: Lock Screen", true},
 	{"xfce4-settings-manager", "macmenu: System Settings…", true},

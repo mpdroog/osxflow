@@ -28,12 +28,17 @@ a big upgrade, or whenever the desktop looks wrong.
   The tools that should run all session are running, and so are
   xfce4-power-manager and gokeyd.
 - **D-Bus**: menubar owns the tray and notifyd owns notifications. The
-  service overrides in `~/.local/share/dbus-1/services` are intact, and the
+  service overrides in `~/.local/share/dbus-1/services` are intact
+  (notifications activate notifyd through systemd), and the
   system still ships a service of each overridden name.
 - **systemd**: the masked user units are still masked, and still exist
   under that name.
-- **Autostart**: the hidden entries are still hidden and still exist. Our
-  tools start at login. Anything new in `/etc/xdg/autostart` is flagged.
+- **Supervision**: the systemd units that start and restart the tools are
+  installed, `osxflow.desktop` starts them at login, and no per-tool
+  autostart entry left from before starts a second copy.
+- **Autostart**: the hidden entries are still hidden and still exist.
+  wallpaper starts at login. Anything new in `/etc/xdg/autostart` is
+  flagged.
 - **XFCE session**: the Failsafe session does not start xfce4-panel or
   xfdesktop, and XFCE is not saving sessions (a saved session would bring
   back whatever was running).

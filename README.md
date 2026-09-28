@@ -30,23 +30,55 @@ that fill in what that arrangement is missing.
     make lint       # golangci-lint
     make fuzz       # the fuzz targets, briefly
     make icons      # re-rasterise the icon theme for cmd/dock
-    make install    # into ~/.local/bin
+    make install    # into ~/.local/bin, and the session into systemd
+    make restart    # run the newly installed binaries now
 
 Every binary is built with `CGO_ENABLED=0` and is statically linked.
 
-`make install` only copies the binaries. Each tool replaces something
-XFCE already runs, and its own README says how to switch over, and back:
+## The session
+
+The tools that run all session -- menubar, dock, netmenu, powermenu,
+soundmenu, bluemenu and notifyd -- are started and supervised by systemd,
+each as `osxflow@<tool>.service`. One autostart entry,
+`~/.config/autostart/osxflow.desktop`, starts `osxflow.target` at login;
+`osxflow-session.service` ends it with the X session. A tool that stops
+for any reason is restarted, after 1s at first and at most 30s apart, and
+systemd never gives up on it. The units in [files/systemd](files/systemd)
+say why each piece is there.
+
+    systemctl --user status osxflow.target 'osxflow@*'
+    journalctl --user -u osxflow@dock        # its log
+    systemctl --user restart osxflow@dock
+
+This exists because on 2026-09-27 the dock and the menubar both exited at
+login and nothing started them again. Two rules came out of that, for
+every tool:
+
+- **Do not exit over a state the session can be in.** No windows open, a
+  D-Bus name not owned yet, no battery or Bluetooth adapter: show nothing,
+  log it, and retry. Exit only on what cannot change, like no display.
+- **Do not rely on the exit being noticed.** systemd restarts the tool,
+  but a tool that exits over a lasting state only restarts into the same
+  exit.
+
+`osxflow-doctor` checks all of this, including that no old per-tool
+autostart entry starts a second copy.
+
+## Switching over
+
+Each tool replaces something XFCE already runs, and its own README says
+how to switch over, and back:
 
 - `launcher` is bound to a keyboard shortcut and replaces ulauncher — see
   [Use](cmd/launcher/README.md#use).
-- `dock` is started at login and replaces plank — see
+- `dock` replaces plank — see
   [Installing](cmd/dock/README.md#installing).
-- `notifyd` is started by the session bus and replaces xfce4-notifyd —
+- `notifyd` replaces xfce4-notifyd —
   see [Installing](cmd/notifyd/README.md#installing).
-- `netmenu` is started at login and replaces nm-applet, once every VPN's
+- `netmenu` replaces nm-applet, once every VPN's
   secrets are stored with NetworkManager — see
   [Installing](cmd/netmenu/README.md#installing).
-- `powermenu` and `soundmenu` are started at login and replace two panel
+- `powermenu` and `soundmenu` replace two panel
   plugins, which come off the panel — see
   [powermenu](cmd/powermenu/README.md#installing) and
   [soundmenu](cmd/soundmenu/README.md#installing).

@@ -109,6 +109,13 @@ func SpawnDetached(app *desktop.App) error {
 		}
 		argv = wrapped
 	}
+	// Looked up here even when systemd-run is what starts it, which would
+	// otherwise start fine and only then fail to find the app, too late
+	// for the caller to hear about it.
+	if _, err := exec.LookPath(argv[0]); err != nil {
+		return fmt.Errorf("starting %s: %w", app.Name, err)
+	}
+	argv = InOwnScope(argv, app.Name)
 
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
@@ -159,6 +166,33 @@ func SpawnDetached(app *desktop.App) error {
 		}
 	}()
 	return nil
+}
+
+// InOwnScope returns argv wrapped to run in a systemd scope of its own,
+// when this process is a systemd service; otherwise argv unchanged.
+//
+// A service's cgroup holds everything it starts, however detached, and
+// systemd stops the whole cgroup when the service stops. Every app the
+// dock started would die with it -- a dock that crashed, or was restarted
+// by hand -- and would count against its memory limit meanwhile.
+// systemd-run --scope makes the scope first and then execs argv inside
+// it, so nothing is ever left behind in ours, as it would be moving the
+// process across after it started, by which time it may have forked.
+//
+// INVOCATION_ID is how systemd tells a service it is one. Started any
+// other way -- by hand, from a keybinding -- there is no service cgroup to
+// escape, and argv runs as it always has.
+func InOwnScope(argv []string, description string) []string {
+	if os.Getenv("INVOCATION_ID") == "" {
+		return argv
+	}
+	run, err := exec.LookPath("systemd-run")
+	if err != nil {
+		log.Printf("no systemd-run, so %s stops with this service: %v", description, err)
+		return argv
+	}
+	return append([]string{run, "--user", "--scope", "--collect", "--quiet",
+		"--slice=app.slice", "--description=" + description, "--"}, argv...)
 }
 
 // terminalCandidates is tried in order for Terminal=true entries.

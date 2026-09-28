@@ -38,7 +38,8 @@ on the session bus (`internal/mpris`). If the sound server restarts,
 soundmenu shows that there is none and connects again every two seconds.
 
 The PulseAudio library prints messages it does not recognise to standard
-output, so an odd line from it may turn up in `~/.xsession-errors`.
+output, so an odd line from it may turn up in
+`journalctl --user -u osxflow@soundmenu`.
 
 ## Installing
 
@@ -47,10 +48,10 @@ output, so an odd line from it may turn up in `~/.xsession-errors`.
     make soundmenu
     install -m755 bin/soundmenu ~/.local/bin/soundmenu
 
-**2. Start it at login:**
-
-    printf '[Desktop Entry]\nType=Application\nName=Sound Menu\nExec=%s/.local/bin/soundmenu\nX-GNOME-Autostart-enabled=true\n' "$HOME" \
-      > ~/.config/autostart/soundmenu.desktop
+**2. Install the session.** `make install` (or `make install-session`
+alone) installs `osxflow.target` and the `osxflow@soundmenu` service it
+already wants, which starts soundmenu at login and restarts it if it ever
+stops; see [files/systemd](../../files/systemd) for why.
 
 **3. Take the PulseAudio plugin off the panel,** which also frees the
 volume keys. Find its id and the panel's list of plugin ids:
@@ -71,25 +72,25 @@ id back restores it:
 
 **4. Start it now,** after the panel has restarted, so the keys are free:
 
-    setsid -f sh -c 'exec "$HOME/.local/bin/soundmenu" >>"$HOME/.xsession-errors" 2>&1 </dev/null'
+    systemctl --user restart osxflow@soundmenu
 
 Check that nothing says a key is taken:
 
-    grep 'soundmenu:' ~/.xsession-errors | tail
+    journalctl --user -u osxflow@soundmenu | grep 'soundmenu:' | tail
 
 ### Updating
 
     make soundmenu && install -m755 bin/soundmenu ~/.local/bin/soundmenu
-    pkill -x soundmenu
-    setsid -f sh -c 'exec "$HOME/.local/bin/soundmenu" >>"$HOME/.xsession-errors" 2>&1 </dev/null'
+    systemctl --user restart osxflow@soundmenu
 
 ### Uninstalling
 
-Stop soundmenu first, so the plugin can take the keys back, then put the
+Stop soundmenu first, so the plugin can take the keys back. Remove
+`osxflow@soundmenu.service` from `Wants=` in
+`files/systemd/osxflow.target`, run `make install-session`, then put the
 plugin's id back where it was and restart the panel:
 
-    pkill -x soundmenu
-    rm ~/.config/autostart/soundmenu.desktop
+    systemctl --user stop osxflow@soundmenu
     xfconf-query -c xfce4-panel -p /panels/panel-1/plugin-ids --force-array \
       -t int -s 1 -t int -s 7 -t int -s 8 -t int -s 10 -t int -s 11 -t int -s 12 -t int -s 13
     xfce4-panel -r
