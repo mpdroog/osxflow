@@ -80,8 +80,18 @@ lint: errguard
 # is how a failure reaches t.Errorf, error included.
 ERRDROP := //nolint:[a-z,]*errcheck|_ = err$$|\berr == nil &&|\berr != nil [|][|]
 
+# find, not `grep -r --include`: --include and --exclude are GNU extensions,
+# and on a busybox grep -- Alpine -- they are not merely ignored, they make
+# grep exit non-zero with a usage error. `if grep ...; then` reads that as
+# "nothing found", so the check passed without ever looking. It matters that
+# the failure was silent: this is the one check that guards every other
+# error path in the tree. Selecting the files with find and testing the
+# output for emptiness behaves the same on GNU and busybox.
 errguard:
-	@if grep -rnE --include='*.go' --exclude='*_test.go' '$(ERRDROP)' cmd internal tools wl; then \
+	@out=$$(find cmd internal tools wl -name '*.go' ! -name '*_test.go' \
+		-exec grep -nE '$(ERRDROP)' {} + || true); \
+	if [ -n "$$out" ]; then \
+		echo "$$out"; \
 		echo "errguard: errors above are checked and then dropped; return or log them"; \
 		exit 1; \
 	fi
