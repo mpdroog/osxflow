@@ -8,7 +8,7 @@ import (
 
 	"github.com/mpdroog/osxflow/internal/glyph"
 	"github.com/mpdroog/osxflow/internal/netmgr"
-	"github.com/mpdroog/osxflow/internal/sni"
+	"github.com/mpdroog/osxflow/sni"
 )
 
 // iconSizes are the pixmaps handed to the tray, which picks the one

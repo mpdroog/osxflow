@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/mpdroog/osxflow/internal/audio"
-	"github.com/mpdroog/osxflow/internal/menu"
 	"github.com/mpdroog/osxflow/internal/mpris"
+	"github.com/mpdroog/osxflow/menu"
 )
 
 type fakeActions struct{ calls []string }

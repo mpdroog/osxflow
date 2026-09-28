@@ -9,8 +9,8 @@ import (
 	"image/color"
 
 	"github.com/mpdroog/osxflow/internal/glyph"
-	"github.com/mpdroog/osxflow/internal/menu"
 	"github.com/mpdroog/osxflow/internal/netmgr"
+	"github.com/mpdroog/osxflow/menu"
 )
 
 // actions is what the menu's rows do.

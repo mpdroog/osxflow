@@ -21,8 +21,8 @@ import (
 	xdraw "golang.org/x/image/draw"
 
 	"github.com/mpdroog/osxflow/internal/dbusmenu"
-	"github.com/mpdroog/osxflow/internal/sni"
 	"github.com/mpdroog/osxflow/internal/text"
+	"github.com/mpdroog/osxflow/sni"
 )
 
 // callTimeout bounds one call to an item.

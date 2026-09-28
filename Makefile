@@ -88,7 +88,7 @@ ERRDROP := //nolint:[a-z,]*errcheck|_ = err$$|\berr == nil &&|\berr != nil [|][|
 # error path in the tree. Selecting the files with find and testing the
 # output for emptiness behaves the same on GNU and busybox.
 errguard:
-	@out=$$(find cmd internal tools wl -name '*.go' ! -name '*_test.go' \
+	@out=$$(find cmd internal tools wl sni menu -name '*.go' ! -name '*_test.go' \
 		-exec grep -nE '$(ERRDROP)' {} + || true); \
 	if [ -n "$$out" ]; then \
 		echo "$$out"; \

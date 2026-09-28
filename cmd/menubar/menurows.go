@@ -6,7 +6,7 @@ package main
 
 import (
 	"github.com/mpdroog/osxflow/internal/dbusmenu"
-	"github.com/mpdroog/osxflow/internal/menu"
+	"github.com/mpdroog/osxflow/menu"
 )
 
 // menuRows turns a menu's entries into rows. click is called with the id of

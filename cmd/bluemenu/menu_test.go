@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/mpdroog/osxflow/internal/bluez"
-	"github.com/mpdroog/osxflow/internal/menu"
+	"github.com/mpdroog/osxflow/menu"
 )
 
 type fakeActions struct{ calls []string }

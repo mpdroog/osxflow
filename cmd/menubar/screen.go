@@ -24,8 +24,8 @@ import (
 
 	"golang.org/x/image/font"
 
-	"github.com/mpdroog/osxflow/internal/menu"
 	"github.com/mpdroog/osxflow/internal/xmon"
+	"github.com/mpdroog/osxflow/menu"
 	"github.com/mpdroog/osxflow/wl"
 )
 

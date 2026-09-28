@@ -10,8 +10,8 @@ import (
 
 	"github.com/mpdroog/osxflow/internal/audio"
 	"github.com/mpdroog/osxflow/internal/glyph"
-	"github.com/mpdroog/osxflow/internal/menu"
 	"github.com/mpdroog/osxflow/internal/mpris"
+	"github.com/mpdroog/osxflow/menu"
 )
 
 // view is everything the menu, the icon and the overlay show.

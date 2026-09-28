@@ -33,10 +33,10 @@ import (
 
 	"github.com/mpdroog/osxflow/internal/desktop"
 	"github.com/mpdroog/osxflow/internal/launch"
-	"github.com/mpdroog/osxflow/internal/menu"
-	"github.com/mpdroog/osxflow/internal/sni"
 	"github.com/mpdroog/osxflow/internal/text"
 	"github.com/mpdroog/osxflow/internal/xwin"
+	"github.com/mpdroog/osxflow/menu"
+	"github.com/mpdroog/osxflow/sni"
 	"github.com/mpdroog/osxflow/wl"
 )
 

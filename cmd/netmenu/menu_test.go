@@ -7,8 +7,8 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
-	"github.com/mpdroog/osxflow/internal/menu"
 	"github.com/mpdroog/osxflow/internal/netmgr"
+	"github.com/mpdroog/osxflow/menu"
 )
 
 // fakeActions records what the rows ask for.

@@ -8,8 +8,8 @@ import (
 
 	"github.com/mpdroog/osxflow/internal/backlight"
 	"github.com/mpdroog/osxflow/internal/glyph"
-	"github.com/mpdroog/osxflow/internal/menu"
 	"github.com/mpdroog/osxflow/internal/upower"
+	"github.com/mpdroog/osxflow/menu"
 )
 
 // view is everything the menu and the icon show.

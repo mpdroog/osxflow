@@ -24,7 +24,7 @@ import (
 
 	"github.com/mpdroog/osxflow/internal/desktop"
 	"github.com/mpdroog/osxflow/internal/launch"
-	"github.com/mpdroog/osxflow/internal/menu"
+	"github.com/mpdroog/osxflow/menu"
 )
 
 func main() {

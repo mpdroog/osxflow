@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/mpdroog/osxflow/internal/dbusmenu"
-	"github.com/mpdroog/osxflow/internal/menu"
+	"github.com/mpdroog/osxflow/menu"
 )
 
 func rowKinds(rows []menu.Row) []menu.Kind {

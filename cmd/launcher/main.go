@@ -22,10 +22,10 @@ import (
 	"github.com/mpdroog/osxflow/internal/desktop"
 	"github.com/mpdroog/osxflow/internal/frecency"
 	"github.com/mpdroog/osxflow/internal/launch"
-	"github.com/mpdroog/osxflow/internal/menu"
 	"github.com/mpdroog/osxflow/internal/search"
 	"github.com/mpdroog/osxflow/internal/ui"
 	"github.com/mpdroog/osxflow/internal/xwin"
+	"github.com/mpdroog/osxflow/menu"
 )
 
 func main() {

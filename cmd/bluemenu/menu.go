@@ -11,7 +11,7 @@ import (
 
 	"github.com/mpdroog/osxflow/internal/bluez"
 	"github.com/mpdroog/osxflow/internal/glyph"
-	"github.com/mpdroog/osxflow/internal/menu"
+	"github.com/mpdroog/osxflow/menu"
 )
 
 // view is everything the menu, the prompt and the icon show.

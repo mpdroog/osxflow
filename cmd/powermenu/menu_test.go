@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/mpdroog/osxflow/internal/backlight"
-	"github.com/mpdroog/osxflow/internal/menu"
 	"github.com/mpdroog/osxflow/internal/upower"
+	"github.com/mpdroog/osxflow/menu"
 )
 
 type fakeActions struct{ calls []string }

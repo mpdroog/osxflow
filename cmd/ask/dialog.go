@@ -21,10 +21,10 @@ import (
 	"github.com/jezek/xgbutil/keybind"
 	"golang.org/x/image/font"
 
-	"github.com/mpdroog/osxflow/internal/menu"
 	"github.com/mpdroog/osxflow/internal/paint"
 	"github.com/mpdroog/osxflow/internal/text"
 	"github.com/mpdroog/osxflow/internal/xmon"
+	"github.com/mpdroog/osxflow/menu"
 )
 
 // errCancelled is a dialog the user dismissed. It is not a failure, and

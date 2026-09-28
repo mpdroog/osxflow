@@ -14,9 +14,9 @@ import (
 	"github.com/jezek/xgb/xproto"
 
 	"github.com/mpdroog/osxflow/internal/glyph"
-	"github.com/mpdroog/osxflow/internal/menu"
 	"github.com/mpdroog/osxflow/internal/paint"
 	"github.com/mpdroog/osxflow/internal/xmon"
+	"github.com/mpdroog/osxflow/menu"
 )
 
 type osdKind int

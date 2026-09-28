@@ -12,7 +12,7 @@ import (
 	"github.com/jezek/xgb/xproto"
 
 	"github.com/mpdroog/osxflow/internal/geom"
-	"github.com/mpdroog/osxflow/internal/menu"
+	"github.com/mpdroog/osxflow/menu"
 )
 
 // barEvents is what the bar window listens to.
