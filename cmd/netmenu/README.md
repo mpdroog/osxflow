@@ -11,8 +11,12 @@ purpose:
 - **Networks.** Known networks (ones with a saved profile) first, then
   others, strongest first, at most six and eight. One click joins a known
   network, or an open one. A network that needs a password you have never
-  entered opens nm-connection-editor, which asks for it and saves it; after
-  that it is a known network.
+  entered opens a password field under itself, in the menu: type it and
+  press Return, and after that it is a known network. A password the
+  network refuses brings the field back, saying so, and nothing is saved.
+  Escape closes the menu and forgets what was typed. A network that wants
+  more than a password -- an enterprise login, WEP -- opens
+  nm-connection-editor instead.
 - **VPNs.** Every saved VPN profile, WireGuard included, with a switch.
 - **Network Settings…** opens nm-connection-editor for everything else.
 
@@ -27,8 +31,9 @@ connection needs a secret it does not have, by prompting or by reading your
 keyring. netmenu does not. A profile works with netmenu when NetworkManager
 stores all of its secrets itself -- `*-flags` of `0` in `nmcli connection
 show <name>` -- and fails otherwise, with NetworkManager's reason in the
-log. Wi-Fi profiles saved by nm-connection-editor or nmcli are stored that
-way by default; VPN profiles often are not. See *Installing*, step 2.
+log. Wi-Fi profiles saved by netmenu's own password field, by
+nm-connection-editor or by nmcli are stored that way; VPN profiles often
+are not. See *Installing*, step 2.
 
 There are no connect and disconnect notifications either.
 

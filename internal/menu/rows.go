@@ -1,6 +1,6 @@
 // Package menu is the dropdown the osxflow tray tools open from the panel:
 // a translucent, rounded, macOS-style menu of rows -- switches, sliders,
-// lists, media buttons -- in an X11 window.
+// lists, media buttons, a field to type into -- in an X11 window.
 //
 // A tool describes the menu as a list of Rows, each carrying what clicking
 // or dragging it does, and hands the list to a Host. When the state behind
@@ -34,6 +34,7 @@ const (
 	Transport             // a centred row of buttons
 	Separator             // hairline
 	Action                // plain label, such as "Settings…"
+	Input                 // a field to type into
 	kindCount
 )
 
@@ -92,6 +93,19 @@ type Row struct {
 	// once it is released, and for each notch of the wheel over it.
 	Slide func(value float64, final bool)
 
+	// Text is what an Input holds, and Label what it shows, dimmed, while
+	// that is nothing. Secret draws a dot for each character instead of
+	// the character.
+	//
+	// The menu does not keep the text; the tool does. Edit receives what
+	// the text becomes with each key, for the tool to put in the Row it
+	// then hands to Update, and Submit receives it on Return. Neither
+	// closes the menu. Keys go to the first Input in the menu.
+	Text   string
+	Secret bool
+	Edit   func(text string)
+	Submit func(text string)
+
 	// Buttons are a Transport row's. Transport buttons never close the
 	// menu.
 	Buttons []Button
@@ -111,7 +125,8 @@ func (r *Row) interactive() bool {
 			}
 		}
 		return false
-	case Section, Note, Separator:
+	case Section, Note, Separator, Input:
+		// An Input is typed into, not clicked.
 		return false
 	case Toggle, Header, Item, Action, kindCount:
 	}

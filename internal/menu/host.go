@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strconv"
 	"time"
 
@@ -150,12 +151,27 @@ func (h *Host) MenuX(trayX int) (int, error) {
 	return h.PointerX()
 }
 
-// keysymEscape is XK_Escape.
-const keysymEscape = 0xff1b
-
 // Keycodes finds every key that produces keysym, in any column of the
 // keymap. There is normally one, but the keymap is the user's to change.
 func (h *Host) Keycodes(keysym xproto.Keysym) ([]xproto.Keycode, error) {
+	km, err := h.readKeymap()
+	if err != nil {
+		return nil, err
+	}
+	var codes []xproto.Keycode
+	for i := 0; (i+1)*km.per <= len(km.syms); i++ {
+		if slices.Contains(km.syms[i*km.per:(i+1)*km.per], keysym) {
+			codes = append(codes, km.first+xproto.Keycode(i))
+		}
+	}
+	if len(codes) == 0 {
+		return nil, fmt.Errorf("no key produces keysym %#x", uint32(keysym))
+	}
+	return codes, nil
+}
+
+// readKeymap asks the server for the keyboard mapping as it is now.
+func (h *Host) readKeymap() (*keymap, error) {
 	setup := xproto.Setup(h.Conn)
 	first := setup.MinKeycode
 	count := byte(setup.MaxKeycode - setup.MinKeycode + 1)
@@ -166,21 +182,10 @@ func (h *Host) Keycodes(keysym xproto.Keysym) ([]xproto.Keycode, error) {
 	if reply == nil {
 		return nil, errors.New("reading the keyboard mapping: no reply from the X server")
 	}
-	per := int(reply.KeysymsPerKeycode)
-	var codes []xproto.Keycode
-	for i := byte(0); i < count; i++ {
-		for j := range per {
-			k := int(i)*per + j
-			if k < len(reply.Keysyms) && reply.Keysyms[k] == keysym {
-				codes = append(codes, first+xproto.Keycode(i))
-				break
-			}
-		}
+	if reply.KeysymsPerKeycode == 0 {
+		return nil, errors.New("reading the keyboard mapping: it has no columns")
 	}
-	if len(codes) == 0 {
-		return nil, fmt.Errorf("no key produces keysym %#x", uint32(keysym))
-	}
-	return codes, nil
+	return &keymap{first: first, per: int(reply.KeysymsPerKeycode), syms: reply.Keysyms}, nil
 }
 
 // menuTop is where a menu's top edge goes before the gap: the top of the

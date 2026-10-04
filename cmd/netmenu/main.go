@@ -2,12 +2,12 @@
 // icon that opens a macOS-style menu of networks and VPNs.
 //
 // It replaces nm-applet's tray icon and GTK menu, and does less on
-// purpose. It turns Wi-Fi on and off, joins networks that have a saved
-// profile or need no password, and switches saved VPNs. Everything else --
-// a new password, a new VPN, editing a profile -- opens
-// nm-connection-editor. It is not a secret agent: a profile whose secrets
-// are not stored with NetworkManager will fail to connect, and say why in
-// the log.
+// purpose. It turns Wi-Fi on and off, joins networks -- asking, in the
+// menu, for the password of one it has not joined before -- and switches
+// saved VPNs. Everything else -- an enterprise login, a new VPN, editing a
+// profile -- opens nm-connection-editor. It is not a secret agent: a
+// profile whose secrets are not stored with NetworkManager will fail to
+// connect, and say why in the log.
 //
 // The NetworkManager side (internal/netmgr) and the tray icon
 // (internal/sni) are D-Bus only. The menu window (internal/menu) is X11.
@@ -79,8 +79,12 @@ type app struct {
 	item       *sni.Item
 
 	state netmgr.State
-	icon  iconState
-	tip   sni.ToolTip
+	// prompt is the password field open in the menu, or nil. joined
+	// carries how a join with a typed password went back to the main loop.
+	prompt *prompt
+	joined chan joinResult
+	icon   iconState
+	tip    sni.ToolTip
 
 	refreshTimer *time.Timer
 	refreshC     <-chan time.Time
@@ -95,6 +99,17 @@ var _ actions = (*app)(nil)
 // callTimeout bounds every call to NetworkManager: a hung daemon should
 // cost a log line, not a frozen menu.
 const callTimeout = 5 * time.Second
+
+// joinTimeout bounds joining a network with a password just typed, up to
+// the connection being up. NetworkManager takes a good part of this to give
+// up on a wrong one.
+const joinTimeout = 60 * time.Second
+
+// joinResult is how joining a network with a typed password went.
+type joinResult struct {
+	ssid []byte
+	err  error
+}
 
 // settle is how long a burst of NetworkManager signals is left to finish
 // before the state is read again. A scan updates every access point in
@@ -119,6 +134,7 @@ func newApp(scaleOverride float64, verbose bool) (*app, error) {
 	a := &app{
 		X:       xu,
 		conn:    xu.Conn(),
+		joined:  make(chan joinResult, 1),
 		lim:     &errlog.Limiter{Burst: logBurst, Per: logEvery},
 		verbose: verbose,
 	}
@@ -220,6 +236,9 @@ func (a *app) run() error {
 			a.refreshTimer, a.refreshC = nil, nil
 			a.refresh()
 
+		case res := <-a.joined:
+			a.joinFinished(res)
+
 		case <-a.sys.Context().Done():
 			return fmt.Errorf("lost the system bus: %w", context.Cause(a.sys.Context()))
 
@@ -263,7 +282,12 @@ func (a *app) refresh() {
 			a.lim.Printf("tooltip", "updating the tooltip: %v", err)
 		}
 	}
-	if err := a.host.Update(buildRows(&a.state, a)); err != nil {
+	a.redraw()
+}
+
+// redraw brings an open menu up to date with the state and the prompt.
+func (a *app) redraw() {
+	if err := a.host.Update(buildRows(&a.state, a.prompt, a)); err != nil {
 		log.Printf("redrawing the menu: %v; it has been closed", err)
 	}
 }
@@ -286,7 +310,12 @@ func (a *app) clicked(c sni.Click) {
 	} else {
 		a.debugf("click: tray sent %d,%d; pointer at x=%d", c.X, c.Y, x)
 	}
-	if err := a.host.Open(x, buildRows(&a.state, a)); err != nil {
+	// A password half typed does not survive the menu closing. A prompt
+	// saying the last one was refused does: this is where that gets read.
+	if a.prompt != nil && !a.prompt.failed {
+		a.prompt = nil
+	}
+	if err := a.host.Open(x, buildRows(&a.state, a.prompt, a)); err != nil {
 		log.Printf("opening the menu: %v", err)
 		return
 	}
@@ -320,6 +349,59 @@ func (a *app) join(n *netmgr.Network) {
 func (a *app) joinOpen(n *netmgr.Network) {
 	ssid, device, ap := slices.Clone(n.Raw), a.state.WifiDevice, n.AP
 	a.async(func(ctx context.Context) error { return a.nm.JoinOpen(ctx, ssid, device, ap) })
+}
+
+func (a *app) askPassword(n *netmgr.Network) {
+	a.prompt = &prompt{ssid: slices.Clone(n.Raw)}
+	a.redraw()
+}
+
+func (a *app) typePassword(text string) {
+	if a.prompt == nil {
+		return
+	}
+	a.prompt.text, a.prompt.note = text, ""
+	a.redraw()
+}
+
+// joinSecured joins a network with the password typed for it. Unlike the
+// other requests it waits for the connection to be up, because a refusal
+// is something to act on: the field comes back, saying so.
+func (a *app) joinSecured(n *netmgr.Network, password string) {
+	if password == "" {
+		return
+	}
+	if !netmgr.ValidPassword(n.Security, password) {
+		if a.prompt != nil {
+			a.prompt.note = noteBadLength
+			a.redraw()
+		}
+		return
+	}
+	a.prompt = nil
+	a.redraw()
+
+	ssid, device, ap, sec := slices.Clone(n.Raw), a.state.WifiDevice, n.AP, n.Security
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
+		defer cancel()
+		a.joined <- joinResult{ssid: ssid, err: a.nm.JoinSecured(ctx, ssid, device, ap, sec, password)}
+	}()
+}
+
+// joinFinished puts the password field back under a network that could not
+// be joined. Success needs nothing: it has arrived as signals already.
+func (a *app) joinFinished(res joinResult) {
+	if res.err == nil {
+		return
+	}
+	a.lim.Printf("request", "%v", res.err)
+	if a.prompt != nil {
+		// Another network is being asked about by now; leave it be.
+		return
+	}
+	a.prompt = &prompt{ssid: res.ssid, note: noteFor(res.err), failed: true}
+	a.redraw()
 }
 
 func (a *app) toggleVPN(v *netmgr.VPN) {

@@ -56,7 +56,10 @@ func (r *fakeRoot) AddAndActivateConnection(settings map[string]map[string]dbus.
 	device, specific dbus.ObjectPath,
 ) (profile, active dbus.ObjectPath, err *dbus.Error) {
 	r.f.record("add %v %s %s", settings[TypeWifi]["ssid"].Value(), device, specific)
-	return "/s/new", "/a/new", nil
+	if sec, ok := settings[typeWifiSecurity]; ok {
+		r.f.record("key %v %v", sec["key-mgmt"].Value(), sec["psk"].Value())
+	}
+	return pathNewSaved, pathNewActive, nil
 }
 
 type fakeSettings struct{ f *fakeNM }
@@ -69,6 +72,16 @@ func (s *fakeSettings) ListConnections() ([]dbus.ObjectPath, *dbus.Error) {
 
 type fakeProfile struct {
 	settings map[string]map[string]dbus.Variant
+
+	// f, when set, hears of the profile being deleted.
+	f *fakeNM
+}
+
+func (p *fakeProfile) Delete() *dbus.Error {
+	if p.f != nil {
+		p.f.record("delete")
+	}
+	return nil
 }
 
 func (p *fakeProfile) GetSettings() (map[string]map[string]dbus.Variant, *dbus.Error) {
@@ -91,6 +104,10 @@ const (
 	pathGoneActive = dbus.ObjectPath("/org/freedesktop/NetworkManager/ActiveConnection/98")
 	pathActiveWifi = dbus.ObjectPath("/org/freedesktop/NetworkManager/ActiveConnection/1")
 	pathIP4        = dbus.ObjectPath("/org/freedesktop/NetworkManager/IP4Config/1")
+	// What AddAndActivateConnection answers with. Neither is exported
+	// until a test does so.
+	pathNewSaved  = dbus.ObjectPath("/org/freedesktop/NetworkManager/Settings/50")
+	pathNewActive = dbus.ObjectPath("/org/freedesktop/NetworkManager/ActiveConnection/50")
 )
 
 func props(t *testing.T, conn *dbus.Conn, path dbus.ObjectPath, m prop.Map) *prop.Properties {
@@ -328,6 +345,103 @@ func TestActions(t *testing.T) {
 	}
 	if on, ok := v.Value().(bool); !ok || on {
 		t.Errorf("WirelessEnabled = %v after SetWifi(false)", v)
+	}
+}
+
+// joining exports the profile and the active connection a join makes, the
+// connection in state.
+func joining(t *testing.T, f *fakeNM, state ActiveState) *prop.Properties {
+	t.Helper()
+	export(t, f.conn, &fakeProfile{f: f}, pathNewSaved, ifaceConnection)
+	return props(t, f.conn, pathNewActive, prop.Map{ifaceActive: {
+		"Connection": ro(pathNewSaved),
+		"Type":       ro(TypeWifi),
+		"State":      {Value: uint32(state), Writable: true, Emit: prop.EmitTrue},
+	}})
+}
+
+func TestJoinSecured(t *testing.T) {
+	c, f := startFake(t)
+	active := joining(t, f, StateActivating)
+	// The connection comes up while it is being waited on.
+	go func() {
+		time.Sleep(joinPoll / 2)
+		if err := active.Set(ifaceActive, "State", dbus.MakeVariant(uint32(StateActivated))); err != nil {
+			t.Errorf("bringing the connection up: %v", err)
+		}
+	}()
+	if err := c.JoinSecured(testContext(t), []byte("cafe"), pathWifi, "/ap/2", SecuritySAE, "correct horse"); err != nil {
+		t.Fatalf("JoinSecured: %v", err)
+	}
+	want := []string{"add [99 97 102 101] " + string(pathWifi) + " /ap/2", "key sae correct horse"}
+	if got := f.recorded(); !slices.Equal(got, want) {
+		t.Errorf("calls:\n got %q\nwant %q", got, want)
+	}
+}
+
+// A profile that does not come up is taken back, so a mistyped password
+// does not leave a known network that can never be joined.
+func TestJoinSecuredRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state ActiveState
+	}{
+		{"went down", StateDeactivated},
+		{"going down", StateDeactivating},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, f := startFake(t)
+			joining(t, f, tc.state)
+			err := c.JoinSecured(testContext(t), []byte("cafe"), pathWifi, "", SecurityPSK, "wrong password")
+			if !errors.Is(err, ErrJoinFailed) {
+				t.Fatalf("JoinSecured = %v, want ErrJoinFailed", err)
+			}
+			want := []string{"add [99 97 102 101] " + string(pathWifi) + " /", "key wpa-psk wrong password", "delete"}
+			if got := f.recorded(); !slices.Equal(got, want) {
+				t.Errorf("calls:\n got %q\nwant %q", got, want)
+			}
+		})
+	}
+}
+
+// NetworkManager drops a connection that failed, sometimes before it is
+// looked at. That is a refusal too, and a profile that cannot be deleted is
+// said as well.
+func TestJoinSecuredConnectionGone(t *testing.T) {
+	c, _ := startFake(t)
+	err := c.JoinSecured(testContext(t), []byte("cafe"), pathWifi, "", SecurityPSK, "wrong password")
+	if !errors.Is(err, ErrJoinFailed) {
+		t.Fatalf("JoinSecured = %v, want ErrJoinFailed", err)
+	}
+	if !strings.Contains(err.Error(), "deleting the profile") {
+		t.Errorf("JoinSecured = %v, want the failed delete in it too", err)
+	}
+}
+
+func TestJoinSecuredTimesOut(t *testing.T) {
+	c, f := startFake(t)
+	joining(t, f, StateActivating)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*joinPoll)
+	defer cancel()
+	err := c.JoinSecured(ctx, []byte("cafe"), pathWifi, "", SecurityPSK, "some password")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("JoinSecured = %v, want the deadline", err)
+	}
+	// Deleted although the context that ran out was the one given.
+	if got := f.recorded(); !slices.Contains(got, "delete") {
+		t.Errorf("calls %q: the profile was left behind", got)
+	}
+}
+
+func TestJoinSecuredWantsAPassphraseNetwork(t *testing.T) {
+	c, f := startFake(t)
+	for _, sec := range []Security{SecurityNone, SecurityOther} {
+		if err := c.JoinSecured(testContext(t), []byte("cafe"), pathWifi, "", sec, "some password"); err == nil {
+			t.Errorf("JoinSecured with security %d did not fail", sec)
+		}
+	}
+	if got := f.recorded(); len(got) != 0 {
+		t.Errorf("calls %q, want none", got)
 	}
 }
 

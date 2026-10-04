@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -39,6 +40,12 @@ const noObject = dbus.ObjectPath("/")
 // one of its objects being unreadable. The State that comes with it is
 // empty and describes nothing; keep the previous one.
 var ErrNoState = errors.New("NetworkManager state unavailable")
+
+// ErrJoinFailed means NetworkManager accepted a new network's profile and
+// then could not bring it up. It does not say why, and neither does
+// NetworkManager in a way worth trusting; with a signal that is not
+// hopeless, it is the password.
+var ErrJoinFailed = errors.New("the network refused the connection")
 
 // Client talks to NetworkManager.
 type Client struct {
@@ -349,6 +356,101 @@ func (c *Client) JoinOpen(ctx context.Context, ssid []byte, device, ap dbus.Obje
 		return fmt.Errorf("joining %q: %w", DisplayName(ssid), err)
 	}
 	return nil
+}
+
+// typeWifiSecurity is the settings group a Wi-Fi profile keeps its key in.
+const typeWifiSecurity = "802-11-wireless-security"
+
+const (
+	// joinPoll is how often a join in progress is looked at.
+	joinPoll = 250 * time.Millisecond
+	// cleanupTimeout bounds taking back a profile that did not work, which
+	// has to happen even when the join ran out of time.
+	cleanupTimeout = 5 * time.Second
+)
+
+// JoinSecured saves a profile for a network that takes a passphrase and
+// joins it, returning once it is up. ctx bounds the whole of that; a wrong
+// passphrase takes NetworkManager some seconds to give up on.
+//
+// A profile that does not come up is deleted again, as nmcli does: left
+// behind it would make the network a known one that can never be joined,
+// with no way here to correct its password. The error is then
+// ErrJoinFailed, or ctx's.
+//
+// The passphrase is stored by NetworkManager, system-wide and readable by
+// root only -- the same place nmcli and nm-connection-editor put it.
+func (c *Client) JoinSecured(ctx context.Context, ssid []byte, device, ap dbus.ObjectPath, sec Security, password string) error {
+	var keyMgmt string
+	switch sec {
+	case SecurityPSK:
+		keyMgmt = "wpa-psk"
+	case SecuritySAE:
+		keyMgmt = "sae"
+	case SecurityNone, SecurityOther:
+		return fmt.Errorf("joining %q: not a network one passphrase joins", DisplayName(ssid))
+	}
+	if ap == "" {
+		ap = noObject
+	}
+	settings := map[string]map[string]dbus.Variant{
+		TypeWifi: {"ssid": dbus.MakeVariant(ssid)},
+		typeWifiSecurity: {
+			"key-mgmt": dbus.MakeVariant(keyMgmt),
+			"psk":      dbus.MakeVariant(password),
+		},
+	}
+	var profile, active dbus.ObjectPath
+	if err := c.conn.Object(BusName, rootPath).
+		CallWithContext(ctx, ifaceRoot+".AddAndActivateConnection", 0, settings, device, ap).
+		Store(&profile, &active); err != nil {
+		return fmt.Errorf("joining %q: %w", DisplayName(ssid), err)
+	}
+	err := c.waitActivated(ctx, active)
+	if err == nil {
+		return nil
+	}
+	// ctx may be what ran out, and the profile has to go regardless.
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
+	if delErr := c.conn.Object(BusName, profile).
+		CallWithContext(cleanup, ifaceConnection+".Delete", 0).Err; delErr != nil {
+		err = errors.Join(err, fmt.Errorf("deleting the profile %s that did not work: %w", profile, delErr))
+	}
+	return fmt.Errorf("joining %q: %w", DisplayName(ssid), err)
+}
+
+// waitActivated returns once an active connection is up, or with
+// ErrJoinFailed once it has gone down or away instead.
+func (c *Client) waitActivated(ctx context.Context, active dbus.ObjectPath) error {
+	tick := time.NewTicker(joinPoll)
+	defer tick.Stop()
+	for {
+		props, err := c.getAll(ctx, active, ifaceActive)
+		switch {
+		case gone(err):
+			// NetworkManager drops a connection that failed.
+			return ErrJoinFailed
+		case err != nil:
+			return err
+		}
+		state, err := value[uint32](props, active, "State")
+		if err != nil {
+			return err
+		}
+		switch ActiveState(state) {
+		case StateActivated:
+			return nil
+		case StateDeactivating, StateDeactivated:
+			return ErrJoinFailed
+		case StateUnknown, StateActivating:
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("still not connected: %w", context.Cause(ctx))
+		case <-tick.C:
+		}
+	}
 }
 
 // RequestScan asks a Wi-Fi device to look for networks now rather than at

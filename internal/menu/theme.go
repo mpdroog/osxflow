@@ -34,6 +34,13 @@ const (
 	baseButton      = 34
 	baseButtonGlyph = 16
 
+	// An Input's field, the dots of a Secret one, and the caret.
+	baseField       = 26
+	baseFieldRadius = 6
+	baseDot         = 6
+	baseDotStep     = 10
+	baseCaretH      = 15
+
 	baseTextPt    = 11
 	baseSectionPt = 9
 )
@@ -48,6 +55,7 @@ var baseHeights = [kindCount]float64{
 	Transport: 40,
 	Separator: 11,
 	Action:    30,
+	Input:     36,
 }
 
 // Theme is a menu's layout in real pixels.
@@ -67,6 +75,9 @@ type Theme struct {
 	sliderGlyph, trackH float64
 	knob                float64
 	button, buttonGlyph float64
+	field, fieldRadius  float64
+	dot, dotStep        float64
+	caretH              float64
 
 	textPt, sectionPt float64
 }
@@ -95,6 +106,11 @@ func NewTheme(scale, width float64) *Theme {
 		knob:        px(baseKnob),
 		button:      px(baseButton),
 		buttonGlyph: px(baseButtonGlyph),
+		field:       px(baseField),
+		fieldRadius: px(baseFieldRadius),
+		dot:         px(baseDot),
+		dotStep:     px(baseDotStep),
+		caretH:      px(baseCaretH),
 		textPt:      baseTextPt * scale,
 		sectionPt:   baseSectionPt * scale,
 	}
@@ -129,6 +145,8 @@ var (
 	colKnob      = color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
 	colKnobEdge  = color.RGBA{R: 0x00, G: 0x00, B: 0x00, A: 0x50}
 	colGlyph     = color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
+
+	colField = color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0x1f}
 
 	colTrack     = color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0x33}
 	colTrackFill = color.RGBA{R: 0xea, G: 0xea, B: 0xf0, A: 0xe6}

@@ -3,7 +3,8 @@
 //
 // It is deliberately a small slice of NetworkManager: Wi-Fi on or off, the
 // networks in range, joining one, and turning a saved VPN on or off.
-// Anything more -- creating a profile, typing a password -- is left to
+// A network that takes one passphrase can be joined with it; anything more
+// -- an enterprise login, editing a profile -- is left to
 // nm-connection-editor. Nothing here knows about a display, so the same
 // package serves an X11 menu today and a Wayland one if that ever comes.
 //
@@ -44,6 +45,67 @@ const (
 // WEP or better.
 const apFlagPrivacy = 0x1
 
+// How a network's key is agreed, from NM80211ApSecurityFlags: bits of
+// WpaFlags and RsnFlags.
+const (
+	secKeyMgmtPSK = 0x100
+	secKeyMgmtSAE = 0x400
+)
+
+// Security is what joining a network takes.
+type Security int
+
+// The kinds of security, by what has to be typed.
+const (
+	// SecurityNone: nothing; the network is open.
+	SecurityNone Security = iota
+	// SecurityPSK: a WPA or WPA2 passphrase.
+	SecurityPSK
+	// SecuritySAE: a WPA3 passphrase.
+	SecuritySAE
+	// SecurityOther: more than one passphrase can say -- a user name and
+	// a password (802.1X), or a WEP key and which kind it is.
+	SecurityOther
+)
+
+// Passphrase reports whether one passphrase is all the network asks for.
+func (s Security) Passphrase() bool { return s == SecurityPSK || s == SecuritySAE }
+
+// The lengths WPA allows a passphrase; one of pskHexLen is the key itself,
+// in hexadecimal.
+const (
+	pskMinLen = 8
+	pskMaxLen = 63
+	pskHexLen = 64
+)
+
+// ValidPassword reports whether NetworkManager would take password for a
+// network secured with s. It says nothing about whether it is the right
+// one; it spares a round trip for one that cannot be.
+func ValidPassword(s Security, password string) bool {
+	switch s {
+	case SecurityPSK:
+		if len(password) == pskHexLen {
+			return isHex(password)
+		}
+		return len(password) >= pskMinLen && len(password) <= pskMaxLen
+	case SecuritySAE:
+		return password != ""
+	case SecurityNone, SecurityOther:
+	}
+	return false
+}
+
+func isHex(s string) bool {
+	for i := range len(s) {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
 // AccessPoint is one radio NetworkManager can hear.
 type AccessPoint struct {
 	Path     dbus.ObjectPath
@@ -59,6 +121,21 @@ type AccessPoint struct {
 // WPA and WPA2/3.
 func (ap *AccessPoint) Secured() bool {
 	return ap.Flags&apFlagPrivacy != 0 || ap.WPAFlags != 0 || ap.RSNFlags != 0
+}
+
+// Security is what joining through this access point takes. One offering
+// both WPA2 and WPA3 is joined as WPA2, which every adapter can do.
+func (ap *AccessPoint) Security() Security {
+	keys := ap.WPAFlags | ap.RSNFlags
+	switch {
+	case !ap.Secured():
+		return SecurityNone
+	case keys&secKeyMgmtPSK != 0:
+		return SecurityPSK
+	case keys&secKeyMgmtSAE != 0:
+		return SecuritySAE
+	}
+	return SecurityOther
 }
 
 // Saved is one saved connection profile.
@@ -94,6 +171,9 @@ type Network struct {
 	AP       dbus.ObjectPath
 
 	Secured bool
+
+	// Security is what joining through AP takes.
+	Security Security
 
 	// Saved is the profile that joins this network, or "" when there is
 	// none.
@@ -225,6 +305,7 @@ func Networks(aps []AccessPoint, activeAP dbus.ObjectPath, saved []Saved, active
 				Strength: ap.Strength,
 				AP:       ap.Path,
 				Secured:  ap.Secured(),
+				Security: ap.Security(),
 			})
 			continue
 		}
@@ -233,7 +314,7 @@ func Networks(aps []AccessPoint, activeAP dbus.ObjectPath, saved []Saved, active
 		case inUse(n.AP):
 			// The access point in use speaks for the network.
 		case inUse(ap.Path) || ap.Strength > n.Strength:
-			n.Strength, n.AP = ap.Strength, ap.Path
+			n.Strength, n.AP, n.Security = ap.Strength, ap.Path, ap.Security()
 		}
 		// One access point of several wanting a key makes the name one
 		// that may: which access point a join lands on is not ours to pick.
