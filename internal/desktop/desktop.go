@@ -11,9 +11,15 @@
 // a locale that has translations we would prefer over Name.
 //
 // The parts that are implemented are implemented properly. The parts that
-// are not — Desktop Actions, DBusActivatable, startup notification — are
-// absent rather than half-present, so a future need for them is a gap to
-// fill and not a bug to find.
+// are not — DBusActivatable, startup notification — are absent rather than
+// half-present, so a future need for them is a gap to fill and not a bug
+// to find.
+//
+// Desktop Actions used to be in that list and are now read, because the
+// menubar opens the focused application's name and needs something to put
+// under it. Of an action only Name and Exec are read: its Icon would need
+// the SVG theme we cannot draw without cgo, and no action on this machine
+// sets OnlyShowIn.
 package desktop
 
 import (
@@ -58,6 +64,26 @@ type App struct {
 
 	// Terminal marks entries that must be run inside a terminal emulator.
 	Terminal bool
+
+	// Actions are the Desktop Actions the entry declares, in the order its
+	// Actions key lists them. Most entries have none: 2 of 146 here do.
+	Actions []Action
+}
+
+// Action is one Desktop Action: a second way into an application that the
+// entry itself names, the way Thunar's offers Home, Computer and Trash.
+type Action struct {
+	// ID is the action's identifier -- the "open-home" of
+	// [Desktop Action open-home]. It is not shown; Name is. It is kept
+	// because it, and not the translated Name, is what another entry or a
+	// preference would refer to the action by.
+	ID string
+
+	Name string
+
+	// Argv is the action's Exec, split as App.Argv is. It always has at
+	// least one element: an action without one is dropped.
+	Argv []string
 }
 
 // entry is the raw key/value content of a [Desktop Entry] group.
@@ -84,43 +110,45 @@ func Load(path, id string) (app App, ok bool, problems []error, err error) {
 		}
 	}()
 
-	e, lineProblems, err := parse(f)
+	e, actions, lineProblems, err := parse(f)
 	if err != nil {
 		return App{}, false, nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
-	app, ok, appProblems := e.toApp(id)
+	app, ok, appProblems := e.toApp(id, actions)
 	for _, p := range append(lineProblems, appProblems...) {
 		problems = append(problems, fmt.Errorf("%s: %w", path, p))
 	}
 	return app, ok, problems, nil
 }
 
-// parse reads the [Desktop Entry] group and stops at the next group
-// header. Later groups are Desktop Actions and similar, which we do not
-// implement; reading them into the same map would let an action's Name
-// overwrite the application's.
+// parse reads the [Desktop Entry] group and every [Desktop Action] group,
+// each into a map of its own. Any other group is skipped.
+//
+// A map per group is the point: an action has a Name and an Exec of its
+// own, and reading every group into one map would let an action's Name
+// overwrite the application's. That is why these groups used to be skipped
+// entirely rather than read into the entry.
 //
 // Lines that are not key=value are problems rather than an error: see the
 // comment where they are skipped.
-func parse(r io.Reader) (e entry, problems []error, err error) {
-	e = entry{}
+func parse(r io.Reader) (e entry, actions map[string]entry, problems []error, err error) {
+	e, actions = entry{}, map[string]entry{}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
-	inGroup := false
+	// group is where the lines being read now go, and nil before the first
+	// group header and inside a group we do not read.
+	var group entry
 	for lineNo := 1; sc.Scan(); lineNo++ {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		if strings.HasPrefix(line, "[") {
-			if inGroup {
-				break // past [Desktop Entry]; the rest is not ours
-			}
-			inGroup = strings.EqualFold(line, "[Desktop Entry]")
+			group = groupFor(line, e, actions)
 			continue
 		}
-		if !inGroup {
+		if group == nil {
 			continue
 		}
 		key, value, found := strings.Cut(line, "=")
@@ -134,19 +162,49 @@ func parse(r io.Reader) (e entry, problems []error, err error) {
 		key = strings.TrimSpace(key)
 		// Localised keys are dropped rather than resolved. See the package
 		// comment: in this locale the untranslated Name is the right answer
-		// and reading 6455 unused strings per scan is not free.
+		// and reading 6455 unused strings per scan is not free. Action
+		// groups are where most of them are -- thunar.desktop is 400 lines
+		// of translated action names around four lines that matter.
 		if strings.ContainsRune(key, '[') {
 			continue
 		}
-		if _, dup := e[key]; dup {
+		if _, dup := group[key]; dup {
 			continue // first occurrence wins, per spec
 		}
-		e[key] = unescape(strings.TrimSpace(value))
+		group[key] = unescape(strings.TrimSpace(value))
 	}
 	if err := sc.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return e, problems, nil
+	return e, actions, problems, nil
+}
+
+// groupFor picks the map a group header's lines belong in: the
+// application's own entry for [Desktop Entry], a fresh map for each
+// [Desktop Action <id>], and nil for anything else.
+//
+// The header is compared without lowering it first, so that a group name
+// whose case folds to a different length cannot shift the index the id is
+// cut at.
+func groupFor(header string, e entry, actions map[string]entry) entry {
+	const prefix = "[Desktop Action "
+	if strings.EqualFold(header, "[Desktop Entry]") {
+		return e
+	}
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) ||
+		!strings.HasSuffix(header, "]") {
+		return nil
+	}
+	id := strings.TrimSpace(header[len(prefix) : len(header)-1])
+	if id == "" {
+		return nil
+	}
+	if _, dup := actions[id]; dup {
+		return nil // first occurrence wins, as it does for a key
+	}
+	group := entry{}
+	actions[id] = group
+	return group
 }
 
 // unescape expands the string escapes the spec defines for values.
@@ -189,7 +247,7 @@ func (e entry) bool(key string) bool { return strings.EqualFold(e[key], "true") 
 //
 // problems are the faults that cost a detail rather than the entry; see
 // Load. A binary that is simply not installed is not one of them.
-func (e entry) toApp(id string) (app App, ok bool, problems []error) {
+func (e entry) toApp(id string, actions map[string]entry) (app App, ok bool, problems []error) {
 	if e["Type"] != "Application" {
 		return App{}, false, nil
 	}
@@ -236,6 +294,9 @@ func (e entry) toApp(id string) (app App, ok bool, problems []error) {
 			binary = resolved
 		}
 	}
+	acts, actProblems := e.actionList(actions)
+	problems = append(problems, actProblems...)
+
 	return App{
 		ID:             id,
 		Name:           name,
@@ -245,7 +306,43 @@ func (e entry) toApp(id string) (app App, ok bool, problems []error) {
 		Binary:         binary,
 		StartupWMClass: e["StartupWMClass"],
 		Terminal:       e.bool("Terminal"),
+		Actions:        acts,
 	}, true, problems
+}
+
+// actionList builds the entry's Desktop Actions, in the order its Actions
+// key lists them.
+//
+// That key is authoritative, not a summary: the spec says a group not named
+// there must be ignored, which is how an entry retires an action without
+// deleting its group. So the key is walked, not the map.
+//
+// An id named there with no group, or a group with no Name or no Exec, is a
+// fault in the file rather than in us: it costs that one action and is
+// reported as a problem, the same way an unresolvable binary costs the
+// matching and not the entry.
+func (e entry) actionList(groups map[string]entry) (out []Action, problems []error) {
+	for _, id := range strings.Split(e["Actions"], ";") {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue // the key conventionally ends in a semicolon
+		}
+		group, ok := groups[id]
+		if !ok {
+			problems = append(problems, fmt.Errorf("action %q is listed in Actions but has no [Desktop Action %s] group, skipped", id, id))
+			continue
+		}
+		name, argv := group["Name"], parseExec(group["Exec"])
+		switch {
+		case name == "":
+			problems = append(problems, fmt.Errorf("action %q has no Name, skipped", id))
+		case len(argv) == 0:
+			problems = append(problems, fmt.Errorf("action %q has no Exec to run, skipped", id))
+		default:
+			out = append(out, Action{ID: id, Name: name, Argv: argv})
+		}
+	}
+	return out, problems
 }
 
 // parseExec splits an Exec value into argv and drops field codes.

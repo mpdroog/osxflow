@@ -92,7 +92,14 @@ type app struct {
 	index      *launch.Index
 	activeAtom xproto.Atom
 	appName    string
-	clock      string
+
+	// appOwner is the focused application's .desktop entry, when its window
+	// matched one, and appWindow the focused window itself. Both are what
+	// the application's menu is built from; see appmenu.go.
+	appOwner  *desktop.App
+	appWindow uint32
+
+	clock string
 
 	fetches chan fetched
 	menus   chan openMenu
@@ -278,32 +285,42 @@ func (a *app) watchFocus() error {
 	return nil
 }
 
-// updateApp shows the name of whatever application has focus now.
+// updateApp shows the name of whatever application has focus now, and
+// remembers what its menu will be built from.
 func (a *app) updateApp() {
-	name, err := a.focusedApp()
+	name, owner, win, err := a.focusedApp()
 	if err != nil {
 		log.Printf("finding the focused application: %v", err)
 	}
+	// The entry and the window are taken whether or not the name changed:
+	// focus moving between two windows of the same application leaves the
+	// bar reading the same, and the menu acts on the window.
+	a.appOwner, a.appWindow = owner, win
 	if name != a.appName {
 		a.appName = name
 		a.relayoutAll()
 	}
 }
 
-// focusedApp is the name of the application whose window has focus: the
-// name from its .desktop entry, or its WM_CLASS when it has none, or ""
-// when the focus is on the desktop, a panel or nothing.
-func (a *app) focusedApp() (string, error) {
+// focusedApp describes the application whose window has focus: the name
+// from its .desktop entry and the entry itself, or its WM_CLASS and no
+// entry when it matched none, and "" with nothing when the focus is on the
+// desktop, a panel or nothing at all.
+//
+// win is the focused window, and 0 exactly when name is empty. The
+// application's menu needs it: closing a window is the one thing that can
+// be offered for an application with no .desktop entry to its name.
+func (a *app) focusedApp() (name string, owner *desktop.App, win uint32, err error) {
 	id, err := a.activeWindow()
 	if err != nil {
-		return "", err
+		return "", nil, 0, err
 	}
 	if id == 0 || a.windows == nil {
-		return "", nil
+		return "", nil, 0, nil
 	}
 	wins, err := a.windows.Windows()
 	if err != nil {
-		return "", err
+		return "", nil, 0, err
 	}
 	for i := range wins {
 		w := &wins[i]
@@ -311,16 +328,16 @@ func (a *app) focusedApp() (string, error) {
 			continue
 		}
 		if !w.Listable() {
-			return "", nil
+			return "", nil, 0, nil
 		}
-		if owner, _ := a.index.Owner(w, launch.ProcExe); owner != nil {
-			return owner.Name, nil
+		if own, _ := a.index.Owner(w, launch.ProcExe); own != nil {
+			return own.Name, own, id, nil
 		}
-		return w.Class, nil
+		return w.Class, nil, id, nil
 	}
 	// Focus on something that is not a managed top-level window: the
 	// desktop, typically.
-	return "", nil
+	return "", nil, 0, nil
 }
 
 // activeWindow is the id of the window that has the keyboard, or 0 when
@@ -521,6 +538,10 @@ func (a *app) press(sc *screen, p image.Point, detail xproto.Button) {
 			log.Printf("opening the calendar: %v", err)
 		}
 	case slotApp:
+		if detail != xproto.ButtonIndex1 {
+			return
+		}
+		a.openAppMenu(sc.screenX(s.r.Min.X + s.r.Dx()/2))
 	}
 }
 

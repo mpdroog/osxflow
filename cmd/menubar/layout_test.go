@@ -112,12 +112,3 @@ func TestOrder(t *testing.T) {
 		t.Error("order(nil) not empty")
 	}
 }
-
-func TestClickable(t *testing.T) {
-	for k, want := range map[slotKind]bool{slotMenu: true, slotItem: true, slotApp: false, slotClock: true} {
-		s := slot{kind: k}
-		if s.clickable() != want {
-			t.Errorf("kind %d clickable = %v", k, !want)
-		}
-	}
-}

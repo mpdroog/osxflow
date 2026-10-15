@@ -98,6 +98,12 @@ type Server interface {
 	// fall back to whatever it did before.
 	ActiveMonitor() (string, error)
 
+	// CloseWindow asks a window to close, the way its own close button
+	// does: the application is told and may put up a "save your work?"
+	// dialog, or refuse. It is a request, not a kill, and it returning nil
+	// means the request was delivered and nothing more.
+	CloseWindow(id uint32) error
+
 	// Close releases the display connection.
 	Close() error
 }
@@ -117,8 +123,13 @@ type Fake struct {
 
 	List []Window
 
-	// Activated is every id passed to Activate, in order.
-	Activated []uint32
+	// Activated is every id passed to Activate, in order, and
+	// ClosedWindows every id passed to CloseWindow.
+	Activated     []uint32
+	ClosedWindows []uint32
+
+	// CloseWindowErr, when set, is returned by CloseWindow.
+	CloseWindowErr error
 
 	Closed bool
 }
@@ -135,6 +146,14 @@ func (f *Fake) Activate(id uint32) error {
 		return f.ActivateErr
 	}
 	f.Activated = append(f.Activated, id)
+	return nil
+}
+
+func (f *Fake) CloseWindow(id uint32) error {
+	if f.CloseWindowErr != nil {
+		return f.CloseWindowErr
+	}
+	f.ClosedWindows = append(f.ClosedWindows, id)
 	return nil
 }
 

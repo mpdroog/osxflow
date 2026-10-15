@@ -4,7 +4,8 @@ The bar across the top of the screen, the way macOS has one:
 
 - **Tux**, at the left, opens [macmenu](../macmenu/README.md).
 - **The focused application's name** beside it: the name from its
-  `.desktop` entry, or its `WM_CLASS` when it has none.
+  `.desktop` entry, or its `WM_CLASS` when it has none. Clicking it opens
+  the application's menu -- see below.
 - **The tray**, at the right: osxflow's power, network, Bluetooth and sound
   menus next to the clock, in that order, and anything else further left
   in the order it appeared.
@@ -14,6 +15,38 @@ The bar across the top of the screen, the way macOS has one:
 
 It replaces xfce4-panel. Running applications are not on it; they are the
 dock's.
+
+## The application's menu
+
+macOS puts the focused application's own File menu on the bar. Almost
+nothing here has one to put there, so clicking the name opens osxflow's
+menu for it instead:
+
+- **New Window**, the entry's `Exec` run again, which for an application
+  that is already up is what its `.desktop` entry means in practice.
+- **Its Desktop Actions**, in the order the entry's `Actions` key lists
+  them: Thunar's Home, Computer and Trash, Mousepad's Preferences. Two of
+  146 entries here declare any, which is the honest size of this feature.
+- **Close Window**, `_NET_CLOSE_WINDOW` under X11 and the foreign-toplevel
+  close request under Wayland. It asks; the application may put up a "save
+  your work?" dialog or refuse, exactly as its own close button does.
+
+A window that matched no `.desktop` entry gets only Close Window, so the
+name is never dead to a click.
+
+**Why not the application's real menu.** That is what the appmenu protocols
+are for, and there are two of them that do not agree: Qt publishes a
+`com.canonical.dbusmenu` tree and registers it with
+`com.canonical.AppMenu.Registrar`, which menubar could own the way it owns
+the tray's watcher and could draw with the dbusmenu client it already has;
+GTK exports a `GMenuModel` over `org.gtk.Menus` instead, and most GTK
+applications have a `GtkHeaderBar` and so no menubar to export at all. Both
+are found through an X11 window property, which a Wayland-native client
+does not have -- under labwc a real appmenu could only ever appear for
+XWayland clients. foot, this machine's terminal, is Wayland-native *and*
+has no menus, so it would be the empty case twice over. Reading the Qt side
+is still worth doing; it is separate work, and waiting for it would have
+left the name unclickable for everything.
 
 ## The tray
 

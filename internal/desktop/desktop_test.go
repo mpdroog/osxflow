@@ -82,7 +82,7 @@ Comment=Does things
 Name=Open a New Window
 Exec=realapp --new-window
 `
-	e, problems, err := parse(strings.NewReader(src))
+	e, acts, problems, err := parse(strings.NewReader(src))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -98,10 +98,13 @@ Exec=realapp --new-window
 	if _, ok := e["Name[nl]"]; ok {
 		t.Error("localised key was retained, want it dropped")
 	}
+	if got := acts["new-window"]["Exec"]; got != "realapp --new-window" {
+		t.Errorf("action Exec = %q, want the action group read into its own map", got)
+	}
 }
 
 func TestParseDuplicateKeyFirstWins(t *testing.T) {
-	e, _, err := parse(strings.NewReader("[Desktop Entry]\nName=First\nName=Second\n"))
+	e, _, _, err := parse(strings.NewReader("[Desktop Entry]\nName=First\nName=Second\n"))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -111,7 +114,7 @@ func TestParseDuplicateKeyFirstWins(t *testing.T) {
 }
 
 func TestParseIgnoresContentBeforeGroup(t *testing.T) {
-	e, _, err := parse(strings.NewReader("Stray=value\n[Desktop Entry]\nName=X\n"))
+	e, _, _, err := parse(strings.NewReader("Stray=value\n[Desktop Entry]\nName=X\n"))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -124,15 +127,19 @@ func TestParseIgnoresContentBeforeGroup(t *testing.T) {
 }
 
 // A line with no '=' is skipped -- the rest of the entry still counts --
-// and reported with its line number.
+// and reported with its line number. A group we do not read is not ours to
+// complain about; an action group is, now that it is read.
 func TestParseReportsMalformedLines(t *testing.T) {
-	src := "[Desktop Entry]\nName=X\nthis line is junk\nExec=x\n[Desktop Action a]\nalso junk, but not ours\n"
-	e, problems, err := parse(strings.NewReader(src))
+	src := "[Desktop Entry]\nName=X\nthis line is junk\nExec=x\n[X-Vendor Extras]\nalso junk, but not ours\n"
+	e, acts, problems, err := parse(strings.NewReader(src))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	if e["Exec"] != "x" {
 		t.Errorf("Exec = %q, want the line after the junk still read", e["Exec"])
+	}
+	if len(acts) != 0 {
+		t.Errorf("actions = %v, want none: [X-Vendor Extras] is not an action group", acts)
 	}
 	if len(problems) != 1 {
 		t.Fatalf("problems = %v, want exactly the one junk line in [Desktop Entry]", problems)
@@ -194,7 +201,7 @@ func TestFindBinary(t *testing.T) {
 func TestToAppTryExecThatCannotRunIsHiddenAndReported(t *testing.T) {
 	path := notExecutable(t)
 	e := entry{"Type": "Application", "Name": "T", "Exec": "/bin/sh", "TryExec": path}
-	_, ok, problems := e.toApp("t.desktop")
+	_, ok, problems := e.toApp("t.desktop", nil)
 	if ok {
 		t.Error("entry is visible, want it hidden")
 	}
@@ -208,7 +215,7 @@ func TestToAppTryExecThatCannotRunIsHiddenAndReported(t *testing.T) {
 func TestToAppUnresolvableBinaryIsReportedNotHidden(t *testing.T) {
 	path := notExecutable(t)
 	e := entry{"Type": "Application", "Name": "T", "Exec": path}
-	app, ok, problems := e.toApp("t.desktop")
+	app, ok, problems := e.toApp("t.desktop", nil)
 	if !ok {
 		t.Fatal("entry is hidden, want it listed")
 	}
@@ -241,11 +248,11 @@ func TestToAppVisibility(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			e, _, err := parse(strings.NewReader(tc.src))
+			e, _, _, err := parse(strings.NewReader(tc.src))
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
-			_, ok, problems := e.toApp("t.desktop")
+			_, ok, problems := e.toApp("t.desktop", nil)
 			if ok != tc.want {
 				t.Errorf("toApp visible = %v, want %v", ok, tc.want)
 			}
@@ -260,11 +267,11 @@ func TestToAppVisibility(t *testing.T) {
 func TestToAppFields(t *testing.T) {
 	src := "[Desktop Entry]\nType=Application\nName=My App\nComment=Nice\n" +
 		"Exec=/bin/sh -c true %U\nIcon=myicon\nStartupWMClass=MyApp\nTerminal=true\n"
-	e, _, err := parse(strings.NewReader(src))
+	e, _, _, err := parse(strings.NewReader(src))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	app, ok, problems := e.toApp("my.desktop")
+	app, ok, problems := e.toApp("my.desktop", nil)
 	if !ok {
 		t.Fatal("toApp said not visible, want visible")
 	}
@@ -523,5 +530,115 @@ func TestScanDirsDedupePrefersEarlierDirectory(t *testing.T) {
 	}
 	if apps[0].ID != "thing.desktop" {
 		t.Errorf("kept %q, want the entry from the first directory", apps[0].ID)
+	}
+}
+
+// Actions come out in the order the Actions key lists them, not the order
+// the groups happen to sit in the file, and an action's own Name and Exec
+// are its own.
+func TestToAppActions(t *testing.T) {
+	src := "[Desktop Entry]\nType=Application\nName=Files\nExec=thunar\n" +
+		"Actions=open-trash;open-home;\n" +
+		"[Desktop Action open-home]\nName=Home\nName[nl]=Thuis\nExec=thunar /home/mp\n" +
+		"[Desktop Action open-trash]\nName=Trash\nExec=thunar trash:///\n"
+	e, acts, _, err := parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	app, ok, problems := e.toApp("thunar.desktop", acts)
+	if !ok {
+		t.Fatal("toApp said not visible, want visible")
+	}
+	if len(problems) != 0 {
+		t.Errorf("problems = %v, want none", problems)
+	}
+	want := []Action{
+		{ID: "open-trash", Name: "Trash", Argv: []string{"thunar", "trash:///"}},
+		{ID: "open-home", Name: "Home", Argv: []string{"thunar", "/home/mp"}},
+	}
+	if !reflect.DeepEqual(app.Actions, want) {
+		t.Errorf("Actions = %+v, want %+v", app.Actions, want)
+	}
+	if app.Name != "Files" || !reflect.DeepEqual(app.Argv, []string{"thunar"}) {
+		t.Errorf("an action overwrote the application's own fields: %+v", app)
+	}
+}
+
+// A group nobody lists in Actions is ignored, which is how an entry retires
+// an action without deleting it.
+func TestToAppActionsOnlyWhatTheKeyLists(t *testing.T) {
+	src := "[Desktop Entry]\nType=Application\nName=A\nExec=a\nActions=kept;\n" +
+		"[Desktop Action kept]\nName=Kept\nExec=a --kept\n" +
+		"[Desktop Action retired]\nName=Retired\nExec=a --retired\n"
+	e, acts, _, err := parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	app, _, problems := e.toApp("a.desktop", acts)
+	if len(problems) != 0 {
+		t.Errorf("problems = %v, want none: an unlisted group is ignored, not a fault", problems)
+	}
+	if len(app.Actions) != 1 || app.Actions[0].ID != "kept" {
+		t.Errorf("Actions = %+v, want only the listed one", app.Actions)
+	}
+}
+
+// An entry with no Actions key has no actions and nothing to report, which
+// is every entry on this machine but two.
+func TestToAppNoActions(t *testing.T) {
+	e := entry{"Type": "Application", "Name": "Foot", "Exec": "foot"}
+	app, ok, problems := e.toApp("foot.desktop", nil)
+	if !ok {
+		t.Fatal("toApp said not visible, want visible")
+	}
+	if len(app.Actions) != 0 || len(problems) != 0 {
+		t.Errorf("Actions = %+v, problems = %v, want both empty", app.Actions, problems)
+	}
+}
+
+// A listed action that cannot be run costs that action and is reported; the
+// others, and the application, survive it.
+func TestToAppBrokenActionsAreReported(t *testing.T) {
+	src := "[Desktop Entry]\nType=Application\nName=A\nExec=a\n" +
+		"Actions=missing;nameless;execless;fine;\n" +
+		"[Desktop Action nameless]\nExec=a --x\n" +
+		"[Desktop Action execless]\nName=No Exec\n" +
+		"[Desktop Action fine]\nName=Fine\nExec=a --fine\n"
+	e, acts, _, err := parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	app, ok, problems := e.toApp("a.desktop", acts)
+	if !ok {
+		t.Fatal("toApp said not visible, want the entry to survive its broken actions")
+	}
+	if len(app.Actions) != 1 || app.Actions[0].ID != "fine" {
+		t.Errorf("Actions = %+v, want only the usable one", app.Actions)
+	}
+	if len(problems) != 3 {
+		t.Fatalf("problems = %v, want one per broken action", problems)
+	}
+	for _, want := range []string{"missing", "nameless", "execless"} {
+		found := false
+		for _, p := range problems {
+			if strings.Contains(p.Error(), want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no problem names action %q: %v", want, problems)
+		}
+	}
+}
+
+// A duplicate action group is the first one, as a duplicate key is.
+func TestParseDuplicateActionGroupFirstWins(t *testing.T) {
+	src := "[Desktop Entry]\nName=A\n[Desktop Action a]\nName=First\n[Desktop Action a]\nName=Second\n"
+	_, acts, _, err := parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(acts) != 1 || acts["a"]["Name"] != "First" {
+		t.Errorf("actions = %v, want only the first [Desktop Action a]", acts)
 	}
 }

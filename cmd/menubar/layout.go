@@ -88,9 +88,6 @@ type slot struct {
 	r    image.Rectangle
 }
 
-// clickable reports whether pressing the slot does something.
-func (s *slot) clickable() bool { return s.kind != slotApp }
-
 // layoutBar places the slots on a bar width pixels wide: Tux and the
 // application's name from the left, the clock and then the tray items from
 // the right. appW and clockW are the widths of their text, and items the

@@ -443,6 +443,19 @@ func (x *x11) Activate(id uint32) error {
 	return nil
 }
 
+// CloseWindow asks the window manager to close a window, which asks the
+// client, which may put up a dialog or refuse.
+//
+// Source indication 2 ("pager") for the same reason Activate uses it: this
+// is the user asking through a menu, not the application closing itself,
+// and a window manager is entitled to treat the two differently.
+func (x *x11) CloseWindow(id uint32) error {
+	if err := ewmh.CloseWindowExtra(x.conn, xproto.Window(id), 0, 2); err != nil {
+		return fmt.Errorf("closing window 0x%x: %w", id, err)
+	}
+	return nil
+}
+
 // ActiveMonitor names the monitor holding the focused window.
 //
 // _NET_ACTIVE_WINDOW rather than the pointer, and the window's centre

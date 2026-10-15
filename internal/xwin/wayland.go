@@ -105,6 +105,16 @@ func (w *wayland) Activate(id uint32) error {
 	return nil
 }
 
+// CloseWindow asks a window to close. zwlr_foreign_toplevel_handle_v1 has
+// a close request, which is the same polite ask _NET_CLOSE_WINDOW is: the
+// client decides what to do with it.
+func (w *wayland) CloseWindow(id uint32) error {
+	if err := w.c.Close(id); err != nil {
+		return fmt.Errorf("closing window 0x%x: %w", id, err)
+	}
+	return nil
+}
+
 // ActiveMonitor names the monitor holding the focused window.
 //
 // The compositor is asked, not X: XWayland has no idea where a

@@ -54,7 +54,10 @@ func (a *app) paint(s *screen) error {
 	mid := s.m.height / 2
 	for i := range s.slots {
 		sl := &s.slots[i]
-		if i == s.hover && sl.clickable() {
+		// Every slot on the bar opens something, so every one of them
+		// lights up under the pointer. The application's name was the
+		// exception until it grew a menu of its own; see appmenu.go.
+		if i == s.hover {
 			paint.RoundRect(img, sl.r, float64(s.m.radius), colHighlight)
 		}
 		switch sl.kind {
