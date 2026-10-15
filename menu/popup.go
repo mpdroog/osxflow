@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"log"
 	"slices"
+	"unicode/utf8"
 
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xproto"
@@ -41,6 +42,11 @@ type popup struct {
 	dragValue float64
 
 	grabbedPointer, grabbedKeyboard bool
+
+	// keys is the keyboard mapping, read when the first key is typed into
+	// an Input: fresh for each menu, since the layout is the user's to
+	// change, and not read at all by the menus nobody types into.
+	keys *keymap
 }
 
 // IsOpen reports whether a menu is showing.
@@ -175,9 +181,42 @@ func (h *Host) Handle(ev xgb.Event) error {
 	case xproto.KeyPressEvent:
 		if slices.Contains(h.escape, e.Detail) {
 			h.Close()
+			return nil
 		}
+		h.key(e)
 	}
 	return nil
+}
+
+// key types into the menu's Input, if it has one. What the key did reaches
+// the screen when the tool, told of it, calls Update.
+func (h *Host) key(e xproto.KeyPressEvent) {
+	p := h.popup
+	i := inputRow(p.rows)
+	if i < 0 {
+		return
+	}
+	if p.keys == nil {
+		km, err := h.readKeymap()
+		if err != nil {
+			log.Printf("%v; nothing can be typed into this menu", err)
+			// Empty rather than nil, so it is said once and not per key.
+			km = &keymap{}
+		}
+		p.keys = km
+	}
+	// A copy: the callbacks below may update or close the menu.
+	r := p.rows[i]
+	act, ch := decodeKey(p.keys.of(e.Detail), e.State)
+	if act == keySubmit {
+		if r.Submit != nil {
+			r.Submit(r.Text)
+		}
+		return
+	}
+	if next, changed := edit(r.Text, act, ch); changed && r.Edit != nil {
+		r.Edit(next)
+	}
 }
 
 func (p *popup) at(h *Host, x, y int) (row, button int) {
@@ -256,7 +295,7 @@ func (h *Host) press(e xproto.ButtonPressEvent) error {
 	case Transport:
 		r.Buttons[button].Click()
 		return nil
-	case Toggle, Header, Section, Note, Item, Separator, Action, kindCount:
+	case Toggle, Header, Section, Note, Item, Separator, Action, Input, kindCount:
 	}
 	if !r.KeepOpen {
 		h.Close()
@@ -398,8 +437,43 @@ func (h *Host) paintRow(img *image.RGBA, i int) {
 				btn.Glyph(img, cx-t.buttonGlyph/2, mid-t.buttonGlyph/2, t.buttonGlyph, col)
 			}
 		}
+	case Input:
+		h.paintInput(img, r, left, right, mid)
 	case kindCount:
 	}
+}
+
+// paintInput draws a field with its text, or its placeholder, and a caret
+// after it. There is no caret to move: typing and Backspace work on the
+// end, which is all a password needs.
+func (h *Host) paintInput(img *image.RGBA, r *Row, left, right, mid float64) {
+	t, f := h.Theme, h.faces
+	glyph.Fill(img, glyph.Area(left, mid-t.field/2, right-left, t.field), colField,
+		glyph.Box((left+right)/2, mid, (right-left)/2, t.field/2, t.fieldRadius))
+
+	x := left + t.padX*0.6
+	caretW := max(t.Scale, 1)
+	width := right - t.padX*0.6 - caretW - x
+	end := x
+	switch {
+	case r.Text == "":
+		drawLabel(img, f.text, colDim, x+caretW+t.Scale*2, mid, r.Label, width-t.Scale*2)
+	case r.Secret:
+		// As many dots as fit; past that the field is simply full.
+		n := min(utf8.RuneCountInString(r.Text), int(width/t.dotStep))
+		radius := t.dot / 2
+		for i := range n {
+			cx := x + float64(i)*t.dotStep + radius
+			glyph.Fill(img, glyph.Area(cx-radius, mid-radius, t.dot, t.dot), colText, glyph.Circle(cx, mid, radius))
+		}
+		end = x + float64(n)*t.dotStep
+	default:
+		shown := tail(r.Text, int(width), func(s string) int { return text.Width(f.text, s) })
+		if shown != "" {
+			end = float64(text.Draw(img, f.text, colText, int(x), baseline(f.text, mid), shown, 0))
+		}
+	}
+	paint.FillBlend(img, image.Rect(int(end), int(mid-t.caretH/2), int(end+caretW), int(mid+t.caretH/2)), colText)
 }
 
 func (h *Host) paintItem(img *image.RGBA, r *Row, left, right, mid float64) {

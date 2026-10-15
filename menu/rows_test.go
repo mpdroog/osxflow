@@ -52,6 +52,8 @@ func TestInteractive(t *testing.T) {
 		{"section", Row{Kind: Section, Click: noop}, false},
 		{"note", Row{Kind: Note, Click: noop}, false},
 		{"separator", Row{Kind: Separator, Click: noop}, false},
+		// Typed into, never clicked.
+		{"input", Row{Kind: Input, Click: noop, Edit: func(string) {}}, false},
 		{"slider with slide", Row{Kind: Slider, Slide: noslide}, true},
 		{"slider with only a click", Row{Kind: Slider, Click: noop}, false},
 		{"transport, all inert", Row{Kind: Transport, Buttons: []Button{{}, {}}}, false},

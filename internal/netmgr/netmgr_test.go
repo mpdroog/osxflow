@@ -76,6 +76,79 @@ func TestSecured(t *testing.T) {
 	}
 }
 
+func TestSecurity(t *testing.T) {
+	for _, tc := range []struct {
+		ap   AccessPoint
+		want Security
+	}{
+		{AccessPoint{}, SecurityNone},
+		{AccessPoint{RSNFlags: 0x188}, SecurityPSK},
+		{AccessPoint{WPAFlags: 0x104}, SecurityPSK},
+		{AccessPoint{RSNFlags: 0x488}, SecuritySAE},
+		// WPA2 and WPA3 together: joined as WPA2.
+		{AccessPoint{RSNFlags: 0x588}, SecurityPSK},
+		// 802.1X, WEP and OWE each want something else.
+		{AccessPoint{RSNFlags: 0x288}, SecurityOther},
+		{AccessPoint{Flags: apFlagPrivacy}, SecurityOther},
+		{AccessPoint{RSNFlags: 0x888}, SecurityOther},
+	} {
+		if got := tc.ap.Security(); got != tc.want {
+			t.Errorf("%+v.Security() = %d, want %d", tc.ap, got, tc.want)
+		}
+		if got := tc.ap.Security().Passphrase(); got != (tc.want == SecurityPSK || tc.want == SecuritySAE) {
+			t.Errorf("%+v: Passphrase() = %t", tc.ap, got)
+		}
+	}
+}
+
+func TestValidPassword(t *testing.T) {
+	hex := strings.Repeat("0aF9", 16)
+	for _, tc := range []struct {
+		sec      Security
+		password string
+		want     bool
+	}{
+		{SecurityPSK, "", false},
+		{SecurityPSK, "1234567", false},
+		{SecurityPSK, "12345678", true},
+		{SecurityPSK, strings.Repeat("x", 63), true},
+		// 64 characters is the key itself, which is hexadecimal.
+		{SecurityPSK, strings.Repeat("x", 64), false},
+		{SecurityPSK, hex, true},
+		{SecurityPSK, hex + "0", false},
+		{SecuritySAE, "", false},
+		{SecuritySAE, "x", true},
+		{SecuritySAE, strings.Repeat("x", 100), true},
+		{SecurityNone, "12345678", false},
+		{SecurityOther, "12345678", false},
+	} {
+		if got := ValidPassword(tc.sec, tc.password); got != tc.want {
+			t.Errorf("ValidPassword(%d, %q) = %t, want %t", tc.sec, tc.password, got, tc.want)
+		}
+	}
+}
+
+// The security is that of the access point a join would go through, which
+// changes with the one that speaks for the network.
+func TestNetworksSecurity(t *testing.T) {
+	aps := []AccessPoint{
+		{Path: "/ap/1", SSID: []byte("home"), Strength: 40, RSNFlags: 0x488},
+		{Path: "/ap/2", SSID: []byte("home"), Strength: 80, RSNFlags: 0x188},
+		{Path: "/ap/3", SSID: []byte("campus"), Strength: 50, RSNFlags: 0x288},
+	}
+	got := Networks(aps, "", nil, nil)
+	if len(got) != 2 || got[0].Name != "home" || got[0].AP != "/ap/2" || got[0].Security != SecurityPSK {
+		t.Errorf("home = %+v, want the stronger access point's WPA2", got)
+	}
+	if len(got) == 2 && got[1].Security != SecurityOther {
+		t.Errorf("campus = %+v, want SecurityOther", got[1])
+	}
+	// Weaker than campus now, so second.
+	if got = Networks(aps, "/ap/1", nil, nil); got[1].AP != "/ap/1" || got[1].Security != SecuritySAE {
+		t.Errorf("home in use on /ap/1 = %+v, want that access point's WPA3", got[1])
+	}
+}
+
 func TestNetworks(t *testing.T) {
 	aps := []AccessPoint{
 		{Path: "/ap/1", SSID: []byte("home"), Strength: 40, RSNFlags: 0x188},
