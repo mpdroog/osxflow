@@ -41,6 +41,7 @@ func main() {
 		def      = flag.String("default", "", "text the entry starts with")
 		editable = flag.Bool("editable", false, "a list may also accept something typed that is not on it")
 		allowNil = flag.Bool("allow-empty", false, "accept an entry left blank instead of treating it as a dismissal")
+		copyBtn  = flag.Bool("copy", false, "a message gets a Copy button that puts its text on the clipboard")
 		scale    = flag.Float64("scale", 0, "display scale; 0 detects it")
 	)
 	flag.Parse()
@@ -73,7 +74,7 @@ func main() {
 		}
 	}
 
-	answer, err := show(NewModel(m, items, *def, *editable, *allowNil), *title, body, *scale)
+	answer, err := show(NewModel(m, items, *def, *editable, *allowNil), *title, body, *copyBtn && m == ModeMessage, *scale)
 	switch {
 	case errors.Is(err, errCancelled):
 		os.Exit(exitCancelled)

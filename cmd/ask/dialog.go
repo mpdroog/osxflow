@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"os"
 
 	"github.com/jezek/xgb/xproto"
 	"github.com/jezek/xgbutil"
@@ -120,10 +121,17 @@ type dialog struct {
 	title  string
 	prompt []string
 	rows   int // rows of list drawn, fixed for the window's life
+
+	// copyText is what the Copy button puts on the clipboard; empty means
+	// there is no button. btn is where it was last drawn, for clicks.
+	copyText string
+	copied   bool
+	copyErr  error
+	btn      image.Rectangle
 }
 
 // show puts the dialog on screen and returns what was accepted.
-func show(m *Model, title, prompt string, scaleOverride float64) (string, error) {
+func show(m *Model, title, prompt string, copyable bool, scaleOverride float64) (string, error) {
 	xu, err := xgbutil.NewConn()
 	if err != nil {
 		return "", fmt.Errorf("connecting to the X server: %w", err)
@@ -138,6 +146,9 @@ func show(m *Model, title, prompt string, scaleOverride float64) (string, error)
 	defer host.Release()
 
 	d := &dialog{xu: xu, host: host, m: m, mt: newMetrics(host.Theme.Scale), title: title}
+	if copyable {
+		d.copyText = prompt
+	}
 	if d.f, err = loadFaces(d.mt.scale); err != nil {
 		return "", err
 	}
@@ -173,6 +184,9 @@ func (d *dialog) height() int {
 	if d.rows > 0 {
 		h += d.mt.gap + d.rows*d.mt.rowH
 	}
+	if d.copyText != "" {
+		h += d.mt.gap + d.mt.fieldH
+	}
 	return h + d.mt.gap + d.mt.lineH
 }
 
@@ -182,7 +196,7 @@ func (d *dialog) open() error {
 	x, y := mon.X+(mon.W-w)/2, mon.Y+(mon.H-h)/3
 
 	win, err := d.host.NewManagedWindow(x, y, w, h, "ask",
-		uint32(xproto.EventMaskKeyPress|xproto.EventMaskExposure|xproto.EventMaskStructureNotify))
+		uint32(xproto.EventMaskKeyPress|xproto.EventMaskButtonPress|xproto.EventMaskExposure|xproto.EventMaskStructureNotify))
 	if err != nil {
 		return err
 	}
@@ -226,6 +240,13 @@ func (d *dialog) loop() (string, error) {
 			if err := d.draw(); err != nil {
 				return "", err
 			}
+		case xproto.ButtonPressEvent:
+			if d.copyText != "" && image.Pt(int(e.EventX), int(e.EventY)).In(d.btn) {
+				d.copy()
+				if err := d.draw(); err != nil {
+					return "", err
+				}
+			}
 		case xproto.ClientMessageEvent:
 			// The frame's close button.
 			return "", errCancelled
@@ -258,6 +279,11 @@ func (d *dialog) key(e xproto.KeyPressEvent) (done bool, answer string, err erro
 		return false, "", nil
 	}
 
+	if d.copyText != "" && (ks == 'c' || ks == 'C') {
+		d.copy()
+		return false, "", nil
+	}
+
 	switch ks {
 	case ksEscape:
 		return true, "", errCancelled
@@ -280,6 +306,17 @@ func (d *dialog) key(e xproto.KeyPressEvent) (done bool, answer string, err erro
 		}
 	}
 	return false, "", nil
+}
+
+// copy puts the message on the clipboard. It can be done any number of
+// times: logging in to the site the text is for tends to overwrite the
+// clipboard on the way, and the dialog stays up for exactly that.
+func (d *dialog) copy() {
+	d.copyErr = copyToClipboard(d.copyText)
+	d.copied = d.copyErr == nil
+	if d.copyErr != nil {
+		fmt.Fprintln(os.Stderr, "ask: copy:", d.copyErr)
+	}
 }
 
 func keysymRune(ks xproto.Keysym) (rune, bool) {
@@ -357,6 +394,22 @@ func (d *dialog) draw() error {
 		y += d.rows * mt.rowH
 	}
 
+	if d.copyText != "" {
+		y += mt.gap
+		label := "Copy"
+		switch {
+		case d.copyErr != nil:
+			label = "Copy failed"
+		case d.copied:
+			label = "Copied"
+		}
+		bw := text.Width(f.regular, "Copy failed") + 2*mt.pad
+		d.btn = image.Rect(x, y, x+bw, y+mt.fieldH)
+		paint.RoundRect(img, d.btn, mt.radius/1.5, colSel)
+		text.DrawCentred(img, f.regular, colText, x+bw/2, y+(mt.fieldH+capHeight(f.regular))/2, label, bw)
+		y += mt.fieldH
+	}
+
 	y += mt.gap + baseline(f.hint, mt.lineH)
 	text.Draw(img, f.hint, colDim, x, y, d.hint(), inner)
 	return d.win.Surf.Flush()
@@ -375,6 +428,9 @@ func (d *dialog) placeholder() string {
 }
 
 func (d *dialog) hint() string {
+	if d.m.Mode == ModeMessage && d.copyText != "" {
+		return "C to copy  ·  Enter or Esc to close"
+	}
 	if d.m.Mode == ModeMessage {
 		return "Enter or Esc to close"
 	}
