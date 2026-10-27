@@ -34,7 +34,7 @@ func copyToClipboard(s string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), copyTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, tool.name, tool.args...)
+	cmd := exec.CommandContext(ctx, tool.name, tool.args...) //nolint:gosec // one of clipboardTool's fixed candidates
 	cmd.Stdin = strings.NewReader(s)
 	// No stdout/stderr pipes: wl-copy's forked server keeps them open for as
 	// long as it owns the selection, and Run would wait on that.

@@ -87,7 +87,6 @@ func (c *Conn) newPool(width, height int) (*pool, []*buffer, error) {
 	// Sealed after the size is final and before the compositor ever sees
 	// it. F_SEAL_SHRINK is the one that matters; the others cost nothing
 	// and say plainly that this file is finished being changed.
-	//nolint:gosec // a descriptor MemfdCreate returned without error is never negative
 	if _, err = unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, unix.F_SEAL_SHRINK|unix.F_SEAL_GROW); err != nil {
 		return closeFD(fmt.Errorf("sealing the shared-memory file: %w", err))
 	}

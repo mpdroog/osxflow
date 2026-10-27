@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"log"
 	"os"
 
 	"github.com/jezek/xgb/xproto"
@@ -144,7 +145,11 @@ func show(m *Model, title, prompt string, copyable bool, scaleOverride float64) 
 	if err != nil {
 		return "", err
 	}
-	defer host.Release()
+	defer func() {
+		if releaseErr := host.Release(); releaseErr != nil {
+			log.Printf("releasing the menu host: %v", releaseErr)
+		}
+	}()
 
 	d := &dialog{xu: xu, host: host, m: m, mt: newMetrics(host.Theme.Scale), title: title}
 	if copyable {
