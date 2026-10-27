@@ -27,13 +27,13 @@ import (
 	"github.com/godbus/dbus/v5"
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xproto"
-	"github.com/jezek/xgbutil"
 	xdraw "golang.org/x/image/draw"
 	"golang.org/x/image/font"
 
 	"github.com/mpdroog/osxflow/internal/desktop"
 	"github.com/mpdroog/osxflow/internal/launch"
 	"github.com/mpdroog/osxflow/internal/text"
+	"github.com/mpdroog/osxflow/internal/xconn"
 	"github.com/mpdroog/osxflow/internal/xwin"
 	"github.com/mpdroog/osxflow/menu"
 	"github.com/mpdroog/osxflow/sni"
@@ -134,7 +134,7 @@ func start() error {
 		}
 	}()
 
-	xu, err := xgbutil.NewConn()
+	xu, err := xconn.Dial()
 	if err != nil {
 		return fmt.Errorf("connecting to X display: %w", err)
 	}

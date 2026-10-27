@@ -24,6 +24,7 @@ import (
 
 	"github.com/mpdroog/osxflow/internal/paint"
 	"github.com/mpdroog/osxflow/internal/text"
+	"github.com/mpdroog/osxflow/internal/xconn"
 	"github.com/mpdroog/osxflow/internal/xmon"
 	"github.com/mpdroog/osxflow/menu"
 )
@@ -132,7 +133,7 @@ type dialog struct {
 
 // show puts the dialog on screen and returns what was accepted.
 func show(m *Model, title, prompt string, copyable bool, scaleOverride float64) (string, error) {
-	xu, err := xgbutil.NewConn()
+	xu, err := xconn.Dial()
 	if err != nil {
 		return "", fmt.Errorf("connecting to the X server: %w", err)
 	}

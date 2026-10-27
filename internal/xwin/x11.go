@@ -18,6 +18,7 @@ import (
 	"github.com/jezek/xgbutil"
 	"github.com/jezek/xgbutil/ewmh"
 
+	"github.com/mpdroog/osxflow/internal/xconn"
 	"github.com/mpdroog/osxflow/internal/xmon"
 )
 
@@ -67,7 +68,7 @@ type propKey struct {
 
 // NewX11 connects to the display named by DISPLAY.
 func NewX11() (Server, error) {
-	conn, err := xgbutil.NewConn()
+	conn, err := xconn.Dial()
 	if err != nil {
 		return nil, fmt.Errorf("connecting to X display: %w", err)
 	}

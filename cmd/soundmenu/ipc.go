@@ -25,6 +25,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -173,6 +177,24 @@ func sendKey(action string) error {
 		}
 	}()
 
+	err = callKey(conn, action)
+	if err == nil || hasOwner(conn) {
+		return err
+	}
+	// Nobody is listening: the running soundmenu died, or never started --
+	// on 2026-10-27 it lost a race with XWayland at login, and every key
+	// press for the rest of the session logged "The name ... was not
+	// provided by any .service files" and did nothing. The key press is
+	// the one moment anyone needs a soundmenu, so it brings one back.
+	log.Printf("%v; starting soundmenu", err)
+	if startErr := ensureRunning(conn); startErr != nil {
+		return fmt.Errorf("%w; and could not start one: %w", err, startErr)
+	}
+	return callKey(conn, action)
+}
+
+// callKey makes the one call to the running instance.
+func callKey(conn *dbus.Conn, action string) error {
 	// A soundmenu that is stuck would otherwise hold every key press for
 	// the bus's 25 seconds, and a held key starts one of these per repeat.
 	ctx, cancel := context.WithTimeout(context.Background(), keyTimeout)
@@ -182,4 +204,90 @@ func sendKey(action string) error {
 		return fmt.Errorf("sending %q to the running soundmenu: %w", action, err)
 	}
 	return nil
+}
+
+// startPatience bounds the wait for a started soundmenu to claim its
+// name: longer than xconn's wait for a slow X server, which it may hit.
+const startPatience = 30 * time.Second
+
+// hasOwner reports whether some soundmenu holds the IPC name.
+func hasOwner(conn *dbus.Conn) bool {
+	var has bool
+	if err := conn.BusObject().Call("org.freedesktop.DBus.NameHasOwner", 0, ipcBusName).Store(&has); err != nil {
+		log.Printf("asking the bus who holds %s: %v", ipcBusName, err)
+		return false
+	}
+	return has
+}
+
+// ensureRunning starts a soundmenu in the background and waits until it
+// answers on the bus.
+//
+// A held key runs one client per repeat, all arriving at once at an empty
+// bus. A lock file serialises them: the first starts the daemon and waits,
+// the rest queue behind it and find it running -- rather than each starting
+// its own, every one taking the name from the last (see exportIPCOn) and
+// a row of tray icons blinking in and out.
+func ensureRunning(conn *dbus.Conn) error {
+	unlock, err := lockStart()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if hasOwner(conn) {
+		return nil
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("finding this binary: %w", err)
+	}
+	// Detached into a session of its own, so it outlives this client and
+	// the compositor's Execute. Its log goes where ours does: labwc's.
+	// Background, not a timeout: the daemon must outlive this call.
+	cmd := exec.CommandContext(context.Background(), self) //nolint:gosec // this same binary, from its own path
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("starting %s: %w", self, err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+
+	deadline := time.After(startPatience)
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case err := <-exited:
+			return fmt.Errorf("the started soundmenu exited: %w", err)
+		case <-deadline:
+			return fmt.Errorf("the started soundmenu did not claim %s within %v", ipcBusName, startPatience)
+		case <-tick.C:
+			if hasOwner(conn) {
+				return nil
+			}
+		}
+	}
+}
+
+// lockStart takes the start lock, waiting for whoever holds it.
+func lockStart() (unlock func(), err error) {
+	dir := os.Getenv("XDG_RUNTIME_DIR")
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "osxflow-soundmenu.lock"), os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // a fixed name in the runtime dir
+	if err != nil {
+		return nil, fmt.Errorf("opening the start lock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return nil, errors.Join(fmt.Errorf("taking the start lock: %w", err), f.Close())
+	}
+	// Closing drops the lock.
+	return func() {
+		if err := f.Close(); err != nil {
+			log.Printf("releasing the start lock: %v", err)
+		}
+	}, nil
 }

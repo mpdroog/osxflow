@@ -30,6 +30,7 @@ import (
 	"github.com/mpdroog/osxflow/internal/launch"
 	"github.com/mpdroog/osxflow/internal/scale"
 	"github.com/mpdroog/osxflow/internal/stack"
+	"github.com/mpdroog/osxflow/internal/xconn"
 	"github.com/mpdroog/osxflow/internal/xmon"
 	"github.com/mpdroog/osxflow/internal/xsurface"
 	"github.com/mpdroog/osxflow/internal/xwin"
@@ -153,7 +154,7 @@ type fallbackKey struct {
 }
 
 func newDock(scaleOverride float64, verbose bool) (*dockApp, error) {
-	X, err := xgbutil.NewConn()
+	X, err := xconn.Dial()
 	if err != nil {
 		return nil, fmt.Errorf("connecting to X display: %w", err)
 	}

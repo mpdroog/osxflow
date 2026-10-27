@@ -30,6 +30,7 @@ import (
 	"github.com/mpdroog/osxflow/internal/errlog"
 	"github.com/mpdroog/osxflow/internal/launch"
 	"github.com/mpdroog/osxflow/internal/mpris"
+	"github.com/mpdroog/osxflow/internal/xconn"
 	"github.com/mpdroog/osxflow/menu"
 	"github.com/mpdroog/osxflow/sni"
 )
@@ -132,7 +133,7 @@ type app struct {
 var _ actions = (*app)(nil)
 
 func newApp(scaleOverride float64, verbose bool) (*app, error) {
-	xu, err := xgbutil.NewConn()
+	xu, err := xconn.Dial()
 	if err != nil {
 		return nil, fmt.Errorf("connecting to X display: %w", err)
 	}

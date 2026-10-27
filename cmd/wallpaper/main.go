@@ -25,6 +25,7 @@ import (
 	"github.com/jezek/xgb/xproto"
 
 	"github.com/mpdroog/osxflow/internal/geom"
+	"github.com/mpdroog/osxflow/internal/xconn"
 	"github.com/mpdroog/osxflow/internal/xsurface"
 	"github.com/mpdroog/osxflow/internal/xwin"
 )
@@ -59,7 +60,7 @@ func run() error {
 		return err
 	}
 
-	conn, err := xgb.NewConn()
+	conn, err := xconn.DialXgb()
 	if err != nil {
 		return fmt.Errorf("connecting to X display: %w", err)
 	}

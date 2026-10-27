@@ -21,6 +21,7 @@ import (
 	"github.com/mpdroog/osxflow/internal/desktop"
 	"github.com/mpdroog/osxflow/internal/errlog"
 	"github.com/mpdroog/osxflow/internal/search"
+	"github.com/mpdroog/osxflow/internal/xconn"
 	"github.com/mpdroog/osxflow/internal/xmon"
 )
 
@@ -93,7 +94,7 @@ type ui struct {
 }
 
 func newUI(apps []desktop.App, onOpen OpenFunc, scaleOverride float64, ranker search.Ranker, monitor string) (*ui, error) {
-	X, err := xgbutil.NewConn()
+	X, err := xconn.Dial()
 	if err != nil {
 		return nil, fmt.Errorf("connecting to X display: %w", err)
 	}

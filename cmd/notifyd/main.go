@@ -28,6 +28,7 @@ import (
 	"github.com/mpdroog/osxflow/internal/icons"
 	"github.com/mpdroog/osxflow/internal/notify"
 	"github.com/mpdroog/osxflow/internal/scale"
+	"github.com/mpdroog/osxflow/internal/xconn"
 	"github.com/mpdroog/osxflow/internal/xfconf"
 	"github.com/mpdroog/osxflow/internal/xwin"
 )
@@ -159,7 +160,7 @@ const (
 )
 
 func newDaemon(scaleOverride float64, verbose bool) (*daemon, error) {
-	X, err := xgbutil.NewConn()
+	X, err := xconn.Dial()
 	if err != nil {
 		return nil, fmt.Errorf("connecting to X display: %w", err)
 	}
