@@ -128,8 +128,14 @@ install-session:
 	@mkdir -p $(DBUSDIR)
 	@printf '[D-BUS Service]\nName=org.freedesktop.Notifications\nExec=%s\nSystemdService=osxflow@notifyd.service\n' \
 		$(PREFIX)/bin/notifyd > $(DBUSDIR)/org.freedesktop.Notifications.service
-	systemctl --user daemon-reload
-	@echo "installed the session; 'make restart' runs the new binaries now"
+	@# Alpine has no systemd: the units are inert there, and labwc's
+	@# autostart starts the tools instead.
+	@if command -v systemctl >/dev/null; then \
+		systemctl --user daemon-reload && \
+		echo "installed the session; 'make restart' runs the new binaries now"; \
+	else \
+		echo "no systemd: skipped daemon-reload; restart the tools to run the new binaries"; \
+	fi
 
 # Replaced binaries only run once their process restarts.
 restart:
