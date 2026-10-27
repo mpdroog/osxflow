@@ -12,6 +12,8 @@ type actions interface {
 	about()
 	// run starts a program and lets the menu go.
 	run(argv ...string)
+	// tile switches window tiling on or off.
+	tile(on bool)
 }
 
 func separator() menu.Row { return menu.Row{Kind: menu.Separator} }
@@ -29,13 +31,13 @@ func action(label string, click func()) menu.Row {
 // missing program is not an error the menu can show: the row would close
 // and nothing would happen. So wayland picks the set, the same way
 // WAYLAND_DISPLAY picks the display code everywhere else.
-func mainRows(userName string, wayland bool, act actions) []menu.Row {
+func mainRows(userName string, wayland, tiling bool, act actions) []menu.Row {
 	logOut := "Log Out"
 	if userName != "" {
 		logOut = "Log Out " + userName
 	}
 	if wayland {
-		return labwcRows(logOut, act)
+		return labwcRows(logOut, tiling, act)
 	}
 	return xfceRows(logOut, act)
 }
@@ -51,11 +53,14 @@ func mainRows(userName string, wayland bool, act actions) []menu.Row {
 //     machine goes down.
 //   - Log Out is labwc's own --exit, which ends the session cleanly.
 //   - There is no System Settings row: nothing on Alpine answers to that.
-func labwcRows(logOut string, act actions) []menu.Row {
+//   - Tile Windows is labwc-only, because cmd/tile is: it places windows
+//     through labwc's snap regions.
+func labwcRows(logOut string, tiling bool, act actions) []menu.Row {
 	return []menu.Row{
 		action("About This Linux", act.about),
 		separator(),
 		action("Task Manager…", func() { act.run("foot", "-T", "Task Manager", "top") }),
+		{Kind: menu.Toggle, Label: "Tile Windows", On: tiling, Click: func() { act.tile(!tiling) }},
 		separator(),
 		action("Sleep", func() { act.run("sh", "-c", lockCmd+" && doas /usr/local/sbin/osxflow-suspend") }),
 		action("Restart", func() { act.run("doas", "/sbin/reboot") }),

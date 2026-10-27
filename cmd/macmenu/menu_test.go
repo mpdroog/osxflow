@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ type fakeActions struct{ calls []string }
 
 func (f *fakeActions) about()             { f.calls = append(f.calls, "about") }
 func (f *fakeActions) run(argv ...string) { f.calls = append(f.calls, "run "+strings.Join(argv, " ")) }
+func (f *fakeActions) tile(on bool)       { f.calls = append(f.calls, fmt.Sprint("tile ", on)) }
 
 func (f *fakeActions) click(r *menu.Row) string {
 	if r.Click == nil {
@@ -42,15 +44,16 @@ func TestMainRows(t *testing.T) {
 		{
 			name:    "labwc",
 			wayland: true,
-			want:    "About This Linux|--|Task Manager…|--|Sleep|Restart|Shut Down|--|Lock Screen|Log Out MP Droog",
+			want:    "About This Linux|--|Task Manager…|Tile Windows|--|Sleep|Restart|Shut Down|--|Lock Screen|Log Out MP Droog",
 			clicks: map[int]string{
-				0: "about",
-				2: "run foot -T Task Manager top",
-				4: "run sh -c swaylock -f -c 000000 && doas /usr/local/sbin/osxflow-suspend",
-				5: "run doas /sbin/reboot",
-				6: "run doas /sbin/poweroff",
-				8: "run sh -c swaylock -f -c 000000",
-				9: "run labwc --exit",
+				0:  "about",
+				2:  "run foot -T Task Manager top",
+				3:  "tile true",
+				5:  "run sh -c swaylock -f -c 000000 && doas /usr/local/sbin/osxflow-suspend",
+				6:  "run doas /sbin/reboot",
+				7:  "run doas /sbin/poweroff",
+				9:  "run sh -c swaylock -f -c 000000",
+				10: "run labwc --exit",
 			},
 		},
 		{
@@ -71,7 +74,7 @@ func TestMainRows(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeActions{}
-			rows := mainRows("MP Droog", tc.wayland, f)
+			rows := mainRows("MP Droog", tc.wayland, false, f)
 			if got := labels(rows); got != tc.want {
 				t.Fatalf("rows:\n got %s\nwant %s", got, tc.want)
 			}
@@ -85,11 +88,23 @@ func TestMainRows(t *testing.T) {
 					t.Errorf("%q keeps the menu open", rows[i].Label)
 				}
 			}
-			anon := mainRows("", tc.wayland, f)
+			anon := mainRows("", tc.wayland, false, f)
 			if got := anon[len(anon)-1].Label; got != "Log Out" {
 				t.Errorf("log out without a name = %q", got)
 			}
 		})
+	}
+}
+
+func TestTileRowShowsAndFlipsTheState(t *testing.T) {
+	f := &fakeActions{}
+	rows := mainRows("", true, true, f)
+	r := &rows[3]
+	if r.Label != "Tile Windows" || r.Kind != menu.Toggle || !r.On {
+		t.Fatalf("row 3 = %+v, want Tile Windows switched on", r)
+	}
+	if got := f.click(r); got != "tile false" {
+		t.Errorf("clicking it on asked for %q, want tile false", got)
 	}
 }
 

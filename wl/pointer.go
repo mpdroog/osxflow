@@ -65,6 +65,12 @@ type Focus struct{}
 // Outputs.
 type Monitor struct{}
 
+// Windows is a window being described anew, opened or closed: its title,
+// its state or the monitors it is on may have changed. It fires often --
+// a terminal retitles itself on every command -- so a caller that cares
+// only about the set of windows compares Toplevels with what it had.
+type Windows struct{}
+
 // Closed is the compositor taking the bar away -- the monitor was
 // unplugged, or it is shutting down. The Bar is finished; its Close is
 // still worth calling, and nothing else on it is.
@@ -78,6 +84,7 @@ func (Button) isEvent()    {}
 func (Closed) isEvent()    {}
 func (Focus) isEvent()     {}
 func (Monitor) isEvent()   {}
+func (Windows) isEvent()   {}
 
 // eventBuffer is how many events are held for a caller that is busy. It is
 // generous because the events that matter -- a click, a configure -- must

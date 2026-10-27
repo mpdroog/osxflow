@@ -5,6 +5,8 @@ the Apple logo:
 
 - **About This Linux** -- model, system, kernel, memory and uptime.
 - **Task Manager…** -- `top` in a foot window.
+- **Tile Windows** -- a switch for [tile](../tile/README.md), under labwc
+  only.
 - **Sleep**, **Restart**, **Shut Down** -- each one happens on the click.
 - **Lock Screen** and **Log Out**.
 
@@ -36,6 +38,7 @@ is picked at runtime from `WAYLAND_DISPLAY`, like the display code:
 | --- | --- | --- |
 | System Settings… | -- | `xfce4-settings-manager` |
 | Task Manager… | `foot -T "Task Manager" top` | `xfce4-taskmanager` |
+| Tile Windows | `tile -enable` / `tile -disable` | -- |
 | Sleep | `swaylock -f -c 000000 && doas /usr/local/sbin/osxflow-suspend` | `xfce4-session-logout --suspend` |
 | Restart | `doas /sbin/reboot` | `xfce4-session-logout --reboot` |
 | Shut Down | `doas /sbin/poweroff` | `xfce4-session-logout --halt` |

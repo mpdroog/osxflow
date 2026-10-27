@@ -20,6 +20,7 @@ that fill in what that arrangement is missing.
 | [`cmd/wallpaper`](cmd/wallpaper) | Sets the desktop background and exits: zoom, fit, stretch or center, nothing left running. Replaces xfdesktop where only the picture is wanted. |
 | [`cmd/bluemenu`](cmd/bluemenu) | Bluetooth menu in the status tray: radio switch, paired devices with connect/disconnect and battery, and the pairing agent's prompts. Replaces blueman's tray icon and applet. |
 | [`cmd/soundmenu`](cmd/soundmenu) | Sound menu in the status tray: volume, output and input devices, microphone, the media that is playing -- plus the volume keys and macOS's volume overlay. Replaces the panel's PulseAudio plugin. |
+| [`cmd/tile`](cmd/tile) | Windows side by side: each monitor's windows in a grid without overlap, laid out again as windows open and close. Switched on and off from the Tux menu. labwc only. |
 | [`cmd/unpack`](cmd/unpack) | Double-click an archive and it is unpacked where it is and gone: zip, tar, gz, bz2, xz, zst, 7z and rar. One item lands as it is, several get a folder, nothing is overwritten. Replaces File Roller as the double-click action. |
 
 ## Build

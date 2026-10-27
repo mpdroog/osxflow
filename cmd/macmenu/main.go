@@ -16,6 +16,7 @@ import (
 	"log"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strings"
 
 	"github.com/godbus/dbus/v5"
@@ -114,7 +115,7 @@ func start() error {
 			log.Printf("%v; opening the menu at the left edge", err)
 		}
 	}
-	if err := host.Open(a.x, mainRows(fullName(), os.Getenv("WAYLAND_DISPLAY") != "", a)); err != nil {
+	if err := host.Open(a.x, mainRows(fullName(), os.Getenv("WAYLAND_DISPLAY") != "", tiling(session), a)); err != nil {
 		return fmt.Errorf("opening the menu: %w", err)
 	}
 	return a.loop(closeReq, closeMenus)
@@ -207,6 +208,34 @@ func (a *app) run(argv ...string) {
 		log.Printf("starting %s: %v", strings.Join(argv, " "), err)
 	}
 }
+
+// tile runs cmd/tile, from beside this binary as menubar runs macmenu, to
+// switch tiling on or off. It is detached: -enable becomes the tiler and
+// outlives the menu.
+func (a *app) tile(on bool) {
+	flagArg := "-disable"
+	if on {
+		flagArg = "-enable"
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		log.Printf("finding tile beside this executable: %v", err)
+		return
+	}
+	a.run(filepath.Join(filepath.Dir(exe), "tile"), flagArg)
+}
+
+// tiling is whether cmd/tile is running, which it does only while on.
+func tiling(bus *dbus.Conn) bool {
+	var has bool
+	if err := bus.BusObject().Call("org.freedesktop.DBus.NameHasOwner", 0, tileBusName).Store(&has); err != nil {
+		log.Printf("asking whether tile is running: %v", err)
+	}
+	return has
+}
+
+// tileBusName is the name cmd/tile holds while it is tiling.
+const tileBusName = "org.osxflow.Tile"
 
 // fullName is the user's name for "Log Out <name>…": the first part of the
 // GECOS field, or the login name when that is empty.

@@ -1,15 +1,16 @@
 // Package wl is the smallest Wayland client that answers one question:
 // which toplevel windows exist, and please focus that one.
 //
-// It is not a general Wayland binding and should not grow into one. It
-// speaks exactly five interfaces -- wl_display, wl_registry, wl_seat,
+// It is not a general Wayland binding and should not grow into one. At
+// heart it speaks five interfaces -- wl_display, wl_registry, wl_seat,
 // wl_output and zwlr_foreign_toplevel_management_v1 -- because those are
 // what a dock and a launcher need to replace the EWMH properties labwc
 // does not publish. wl_output is bound for one reason: to answer "which
 // monitor is that window on", which is how a launcher decides which screen
 // to open on when the pointer is somewhere else entirely.
-// Nothing here draws: osxflow's windows are still X11 surfaces under
-// XWayland, which works, and porting the rendering is a separate job.
+// Two additions have since been made, each for one tool: layer.go draws
+// menubar's bar, and keyboard.go is tile's virtual keyboard. vpointer.go
+// moves the pointer, for the dock's end-to-end test.
 //
 // Why hand-rolled. go-wayland is archived and carries no wlr protocols,
 // and every maintained binding wants cgo, which would cost the static
@@ -121,6 +122,7 @@ const (
 	handleState       = 4
 	handleDone        = 5
 	handleClosed      = 6
+	handleParent      = 7 // from version 3
 
 	outputGeometry = 0
 	outputName     = 4
@@ -171,9 +173,10 @@ const outputReleaseSince = 3
 
 // Toplevel state values from the protocol's state array.
 const (
-	stateMaximized = 0
-	stateMinimized = 1
-	stateActivated = 2
+	stateMaximized  = 0
+	stateMinimized  = 1
+	stateActivated  = 2
+	stateFullscreen = 3
 )
 
 // Toplevel is one top-level window as the compositor describes it.
@@ -190,8 +193,13 @@ type Toplevel struct {
 	AppID string
 	Title string
 
-	Activated bool
-	Minimized bool
+	Activated  bool
+	Minimized  bool
+	Fullscreen bool
+
+	// Parent is the handle of the window this one belongs to -- a dialog's
+	// main window -- or 0 for a window of its own.
+	Parent uint32
 
 	// Outputs are the monitors the window is on, by wl_output object id. A
 	// window straddling two monitors is on both, and one the compositor
@@ -254,6 +262,14 @@ type Conn struct {
 	viewporter uint32
 	fracMgr    uint32
 	pointer    uint32
+
+	// vkbdMgr is zwp_virtual_keyboard_manager_v1, for the one caller that
+	// has to press a compositor keybind; see keyboard.go.
+	vkbdMgr uint32
+
+	// vptrMgr is zwlr_virtual_pointer_manager_v1, for tests that need to
+	// put the pointer somewhere; see vpointer.go.
+	vptrMgr uint32
 
 	// Bars by the object id each kind of event arrives on, because a
 	// Wayland event says only which object it is about.
@@ -826,6 +842,10 @@ func (c *Conn) registry(opcode uint16, body []byte) {
 		c.bindOnce(name, iface, version, viewporterVersion, &c.viewporter)
 	case "wp_fractional_scale_manager_v1":
 		c.bindOnce(name, iface, version, fracVersion, &c.fracMgr)
+	case "zwp_virtual_keyboard_manager_v1":
+		c.bindOnce(name, iface, version, vkbdMgrVersion, &c.vkbdMgr)
+	case "zwlr_virtual_pointer_manager_v1":
+		c.bindOnce(name, iface, version, vptrMgrVersion, &c.vptrMgr)
 	case "zwlr_foreign_toplevel_manager_v1":
 		// Bind at most 3: version 3 adds the parent event, which we ignore
 		// but must not be surprised by. Asking for more than the
@@ -970,13 +990,15 @@ func (c *Conn) toplevel(obj uint32, opcode uint16, body []byte) {
 			vals = vals[:n]
 		}
 		wasActive := t.Activated
-		t.Activated, t.Minimized = false, false
+		t.Activated, t.Minimized, t.Fullscreen = false, false, false
 		for ; len(vals) >= 4; vals = vals[4:] {
 			switch le32(vals) {
 			case stateActivated:
 				t.Activated = true
 			case stateMinimized:
 				t.Minimized = true
+			case stateFullscreen:
+				t.Fullscreen = true
 			}
 		}
 		// Newly focused: move to the end, so the caller's "last match is
@@ -995,6 +1017,12 @@ func (c *Conn) toplevel(obj uint32, opcode uint16, body []byte) {
 		if first && t.Activated {
 			c.emit(Focus{})
 		}
+		c.emit(Windows{})
+	case handleParent:
+		if len(body) < 4 {
+			return
+		}
+		t.Parent = le32(body)
 	case handleClosed:
 		wasActive := t.Activated
 		delete(c.toplevels, obj)
@@ -1002,6 +1030,7 @@ func (c *Conn) toplevel(obj uint32, opcode uint16, body []byte) {
 		if wasActive {
 			c.emit(Focus{})
 		}
+		c.emit(Windows{})
 		// The handle is ours to destroy once the compositor is done with it.
 		go c.sendOrFail(obj, toplevelHandleDestroy)
 	}
