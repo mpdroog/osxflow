@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/jezek/xgb"
+	"github.com/jezek/xgb/randr"
 	"github.com/jezek/xgb/xproto"
 
 	"github.com/mpdroog/osxflow/internal/dock"
@@ -37,11 +38,13 @@ func (d *dockApp) handle(ev xgb.Event) (show, leaving bool, err error) {
 		// to one side of it: the pointer sits on the strip and on nothing
 		// else, so this is the only word the dock gets that it has gone.
 		if d.isTrigger(e.Event) {
+			d.logf("leave: trigger 0x%x at %d,%d", e.Event, e.RootX, e.RootY)
 			return false, true, nil
 		}
 		if e.Event != d.win {
 			return false, false, nil
 		}
+		d.logf("leave: dock at %d,%d", e.RootX, e.RootY)
 		// The pointer left the window entirely. Anything still hovered is
 		// no longer under the cursor.
 		if d.hover != -1 || d.inside {
@@ -75,6 +78,7 @@ func (d *dockApp) handle(ev xgb.Event) (show, leaving bool, err error) {
 		// actually up: raising a hidden dock would fight with whatever the
 		// user is doing for no visible benefit.
 		if e.Window == d.win && e.State != xproto.VisibilityUnobscured && !d.reveal.Hidden() {
+			d.logf("visibility: dock covered, raising it")
 			d.raise(d.win)
 		}
 		return false, false, nil
@@ -84,6 +88,10 @@ func (d *dockApp) handle(ev xgb.Event) (show, leaving bool, err error) {
 			return false, false, nil
 		}
 		return false, false, d.windowsChanged()
+
+	case randr.ScreenChangeNotifyEvent:
+		d.logf("randr: screen is now %dx%d", e.Width, e.Height)
+		return false, false, d.screensChanged(e.Width, e.Height)
 	}
 	return false, false, nil
 }
@@ -94,6 +102,8 @@ func (d *dockApp) enter(e xproto.EnterNotifyEvent) (show, leaving bool, err erro
 		// The bottom edge of a screen: bring the dock up *there*. Nothing
 		// else belongs on this path -- it is the whole of the latency the
 		// user feels, and the first frame of the slide is one tick away.
+		// (The log line is after the work, and only under -v.)
+		defer d.logf("enter: trigger 0x%x at %d,%d, showing on %s", e.Event, e.RootX, e.RootY, d.mon.Name)
 		d.retarget(int(e.RootX), int(e.RootY))
 		d.reveal.Show()
 		d.zoom.Target = 1
@@ -119,6 +129,7 @@ func (d *dockApp) enter(e xproto.EnterNotifyEvent) (show, leaving bool, err erro
 	}
 
 	if e.Event == d.win {
+		d.logf("enter: dock at %d,%d", e.RootX, e.RootY)
 		// The dock slid up under a pointer that never moved, so this is
 		// the first indication of where the cursor actually is.
 		show, _, err = d.pointerAt(float64(e.EventX), float64(e.EventY),

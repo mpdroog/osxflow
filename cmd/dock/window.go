@@ -98,7 +98,7 @@ func (d *dockApp) createDockWindow(width, height, x, y int) error {
 	if nameErr := d.nameWindow(win, "dock"); nameErr != nil {
 		log.Printf("warning: %v", nameErr)
 	}
-	if typeErr := d.setDockType(win); typeErr != nil {
+	if typeErr := d.setWindowType(win, "_NET_WM_WINDOW_TYPE_DOCK"); typeErr != nil {
 		log.Printf("warning: %v", typeErr)
 	}
 	return nil
@@ -156,6 +156,16 @@ func (d *dockApp) createTriggerWindow(width, height, x, y int) error {
 	if nameErr := d.nameWindow(win, "dock-trigger"); nameErr != nil {
 		log.Printf("warning: %v", nameErr)
 	}
+	// Before the map, and for the keyboard's sake: labwc gives focus to an
+	// override-redirect XWayland window that declares no type (see
+	// menu.Window.SetWindowType), and the triggers are remapped every few
+	// seconds by heal -- each time taking the keyboard from whatever the
+	// user was typing in. A notification is one of the types wlroots
+	// leaves unfocused. Not fatal: a trigger that steals focus still
+	// reveals the dock.
+	if typeErr := d.setWindowType(win, "_NET_WM_WINDOW_TYPE_NOTIFICATION"); typeErr != nil {
+		log.Printf("warning: %v; the reveal triggers will take keyboard focus", typeErr)
+	}
 	return nil
 }
 
@@ -177,23 +187,23 @@ func (d *dockApp) nameWindow(win xproto.Window, name string) error {
 	return nil
 }
 
-// setDockType declares _NET_WM_WINDOW_TYPE_DOCK.
+// setWindowType declares a window's _NET_WM_WINDOW_TYPE.
 //
-// The window manager ignores this on an override-redirect window, so it
-// changes no behaviour. It is set because other software reads it: a
-// screen-sharing tool or an accessibility client asking what this window
-// is should get "a dock" rather than nothing.
-func (d *dockApp) setDockType(win xproto.Window) error {
+// The window manager ignores this on an override-redirect window, but
+// other software reads it. For the dock it is a screen-sharing tool or an
+// accessibility client asking what this window is; for the triggers it is
+// the compositor deciding whether a newly mapped window gets the keyboard.
+func (d *dockApp) setWindowType(win xproto.Window, typeName string) error {
 	typeAtom, err := atom(d.conn, "_NET_WM_WINDOW_TYPE")
 	if err != nil {
 		return fmt.Errorf("setting the window type: %w", err)
 	}
-	dockAtom, err := atom(d.conn, "_NET_WM_WINDOW_TYPE_DOCK")
+	valueAtom, err := atom(d.conn, typeName)
 	if err != nil {
 		return fmt.Errorf("setting the window type: %w", err)
 	}
 	if err := xproto.ChangePropertyChecked(d.conn, xproto.PropModeReplace, win,
-		typeAtom, xproto.AtomAtom, 32, 1, atomBytes(dockAtom)).Check(); err != nil {
+		typeAtom, xproto.AtomAtom, 32, 1, atomBytes(valueAtom)).Check(); err != nil {
 		return fmt.Errorf("setting _NET_WM_WINDOW_TYPE: %w", err)
 	}
 	return nil

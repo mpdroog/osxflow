@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jezek/xgb"
+	"github.com/jezek/xgb/randr"
 	"github.com/jezek/xgb/xproto"
 	"github.com/jezek/xgbutil"
 
@@ -131,6 +132,13 @@ type dockApp struct {
 
 	clientList xproto.Atom
 	verbose    bool
+
+	// healSkip is why the last heal did nothing, or "" if it ran; and
+	// healSkips is how many in a row it has skipped for that reason. Kept
+	// for -v, so a dock stuck believing it is up says so once, and then
+	// again as it keeps being stuck, rather than every five seconds.
+	healSkip  string
+	healSkips int
 
 	// lim bounds the errors that can arrive by the dozen: X protocol errors
 	// for unchecked requests, which a failing upload produces several of per
@@ -269,6 +277,11 @@ func newDock(scaleOverride float64, verbose bool) (*dockApp, error) {
 		// appears.
 		d.poll = true
 	}
+	// A resolution change or a monitor plugged in moves every bottom edge;
+	// without hearing about it the dock slides up to where the old one was.
+	if watchErr := d.watchScreens(); watchErr != nil {
+		log.Printf("warning: the dock will not follow screen changes: %v", watchErr)
+	}
 	return d, nil
 }
 
@@ -290,16 +303,28 @@ func (d *dockApp) createWindows() error {
 		return err
 	}
 
-	// One trigger per monitor, each spanning that monitor's own width at
-	// that monitor's own bottom edge: reaching the bottom of whichever
-	// screen you are working on brings the dock there, as macOS does.
+	if err := xproto.MapWindowChecked(d.conn, d.win).Check(); err != nil {
+		return fmt.Errorf("mapping window 0x%x: %w", d.win, err)
+	}
+	if err := d.createTriggers(); err != nil {
+		return err
+	}
+	return d.paint()
+}
+
+// createTriggers makes, maps and damages one reveal strip per monitor in
+// d.mons.
+//
+// One trigger per monitor, each spanning that monitor's own width at that
+// monitor's own bottom edge: reaching the bottom of whichever screen you
+// are working on brings the dock there, as macOS does.
+func (d *dockApp) createTriggers() error {
 	for _, m := range d.mons {
 		if err := d.createTriggerWindow(m.W, triggerH, m.X, m.Bottom()-triggerH); err != nil {
 			return err
 		}
 	}
-
-	for _, win := range append([]xproto.Window{d.win}, d.triggers...) {
+	for _, win := range d.triggers {
 		if mapErr := xproto.MapWindowChecked(d.conn, win).Check(); mapErr != nil {
 			return fmt.Errorf("mapping window 0x%x: %w", win, mapErr)
 		}
@@ -314,7 +339,121 @@ func (d *dockApp) createWindows() error {
 			return damageErr
 		}
 	}
-	return d.paint()
+	return nil
+}
+
+// watchScreens asks RandR to say when the screen's size or layout changes.
+func (d *dockApp) watchScreens() error {
+	if err := randr.Init(d.conn); err != nil {
+		return err
+	}
+	return randr.SelectInputChecked(d.conn, d.screen.Root, randr.NotifyMaskScreenChange).Check()
+}
+
+// screensChanged re-reads the monitors after a resolution or layout change
+// and moves the dock and its triggers to the new bottom edges.
+//
+// The triggers are rebuilt rather than moved: a monitor may have come or
+// gone, and recreating a handful of 3px strips is cheaper to get right than
+// matching old to new.
+func (d *dockApp) screensChanged(w, h uint16) error {
+	// The setup's screen size is what xmon falls back to without RandR, and
+	// it is the size at connect time; keep it current.
+	d.screen.WidthInPixels, d.screen.HeightInPixels = w, h
+	mons := xmon.All(d.conn, d.screen)
+	if slices.Equal(mons, d.mons) {
+		return nil
+	}
+	return d.rebuild(mons)
+}
+
+// rebuild moves the dock onto mons and replaces every reveal trigger.
+//
+// The new strips are made before the old ones go, so there is no moment
+// with nothing at the bottom edge to catch the pointer.
+func (d *dockApp) rebuild(mons []xmon.Rect) error {
+	if !slices.Equal(mons, d.mons) {
+		log.Printf("screens changed: %v", mons)
+	}
+	old := d.triggers
+	d.triggers = nil
+	d.mons = mons
+
+	// Stay on the same monitor if it is still there.
+	if m, ok := xmon.Named(mons, d.mon.Name); ok {
+		d.mon = m
+	} else {
+		d.mon = mons[0]
+	}
+	d.winX = d.mon.X + (d.mon.W-d.winW)/2
+	d.slide()
+	err := d.createTriggers()
+	for _, t := range old {
+		if destroyErr := xproto.DestroyWindowChecked(d.conn, t).Check(); destroyErr != nil {
+			log.Printf("destroying the old reveal trigger: %v", destroyErr)
+		}
+	}
+	return err
+}
+
+// heal rebuilds the reveal triggers from scratch while nobody is using
+// them.
+//
+// A trigger is the dock's only way back on screen, and nothing tells the
+// dock when one has stopped working. It needs a Wayland buffer that
+// XWayland attaches once, on the first damage; it needs to be above every
+// other window, which nobody keeps it; and it needs to be at a bottom edge
+// that RandR may have moved without the dock hearing. At login all three
+// are at the mercy of what labwc and XWayland are still setting up, and a
+// strip that missed any of them stays dead for the life of the process --
+// the dock running, correctly placed, and impossible to summon.
+//
+// So rather than detect each failure, the strips are replaced on a timer:
+// new windows, fresh monitors, mapped, damaged and on top. They are 3px of
+// transparency, so it costs nothing visible.
+//
+// Skipped while the dock is up or a stack is open. It does not ask where
+// the pointer is: under XWayland the answer is wherever the cursor last
+// left an X window -- usually a trigger, so the check said "on the edge,
+// leave it alone" for ever, and nothing healed. Nor is the check needed.
+// The dock hides only once the pointer has left the strips, so a hidden
+// dock with the pointer really on a bottom edge means that edge's strip is
+// dead, and the new one bringing the dock up is the repair working.
+func (d *dockApp) heal() error {
+	skip := ""
+	switch {
+	case d.popup != nil:
+		skip = "a stack is open"
+	case !d.reveal.Hidden():
+		skip = "the dock is up"
+	}
+	if skip != "" {
+		if skip != d.healSkip {
+			d.healSkips = 0
+		}
+		d.healSkip = skip
+		d.healSkips++
+		// The first skip, then once a minute: a dock that is up for longer
+		// than that with nobody on it is the stuck state worth seeing.
+		if d.healSkips%12 == 1 {
+			d.logf("heal: skipped, %s (for %s)", skip, time.Duration(d.healSkips-1)*healInterval)
+		}
+		return nil
+	}
+	if d.healSkip != "" {
+		d.logf("heal: running again")
+		d.healSkip, d.healSkips = "", 0
+	}
+	// A failed read keeps the last known size: the monitors below still
+	// place the dock, and a stale root size is only the union's bound.
+	geo, err := xproto.GetGeometry(d.conn, xproto.Drawable(d.screen.Root)).Reply()
+	switch {
+	case err != nil:
+		d.logf("heal: reading the root's size: %v", err)
+	case geo != nil:
+		d.screen.WidthInPixels, d.screen.HeightInPixels = geo.Width, geo.Height
+	}
+	return d.rebuild(xmon.All(d.conn, d.screen))
 }
 
 // watchRoot asks for PropertyNotify on the root window.
@@ -438,6 +577,10 @@ const frameInterval = 8 * time.Millisecond
 // short enough that it does not feel stuck.
 const hideDelay = 350 * time.Millisecond
 
+// healInterval is how often the reveal triggers are rebuilt; see heal. A
+// dead trigger costs at most this long, rather than a restart.
+const healInterval = 5 * time.Second
+
 func (d *dockApp) run() error {
 	events := make(chan xgb.Event, 64)
 	// errc says why the reader stopped; done stops a reader that is still
@@ -447,6 +590,9 @@ func (d *dockApp) run() error {
 	done := make(chan struct{})
 	defer close(done)
 	go d.readEvents(events, errc, done)
+
+	healTicker := time.NewTicker(healInterval)
+	defer healTicker.Stop()
 
 	var (
 		ticker *time.Ticker
@@ -514,9 +660,19 @@ func (d *dockApp) run() error {
 			}
 			animate(!d.settled())
 
+		case <-healTicker.C:
+			// A heal that fails leaves the old strips or none; the next
+			// one tries again, which is the point of having them.
+			if err := d.heal(); err != nil {
+				log.Printf("rebuilding the reveal triggers: %v", err)
+			}
+
 		case <-hide:
 			hide = nil
-			if d.popup == nil {
+			if d.popup != nil {
+				d.logf("hide: not hiding, a stack is open")
+			} else {
+				d.logf("hide: hiding")
 				d.reveal.Hide()
 				d.zoom.Target = 0
 				animate(true)
@@ -538,6 +694,13 @@ func (d *dockApp) run() error {
 			}
 			animate(!d.settled())
 		}
+	}
+}
+
+// logf logs only under -v.
+func (d *dockApp) logf(format string, args ...any) {
+	if d.verbose {
+		log.Printf(format, args...)
 	}
 }
 

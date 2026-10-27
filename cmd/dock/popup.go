@@ -89,6 +89,7 @@ func (d *dockApp) openStack(i int) error {
 		return err
 	}
 	d.popup = p
+	d.logf("stack: opened %q (pointer grab: %v)", d.items[i].Name, p.grabbed)
 	return p.paint(d)
 }
 
@@ -372,6 +373,9 @@ func (p *popup) paint(d *dockApp) error {
 // failure is logged rather than returned, because the popup is going away
 // either way and every caller has something more useful to do next.
 func (p *popup) close(d *dockApp) {
+	if p.win != 0 {
+		d.logf("stack: closed")
+	}
 	if p.grabbed {
 		if err := xproto.UngrabPointerChecked(d.conn, xproto.TimeCurrentTime).Check(); err != nil {
 			log.Printf("releasing the pointer grab: %v", err)
